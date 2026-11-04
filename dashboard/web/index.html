@@ -39,6 +39,17 @@
       <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
     </section>
 
+    <section class="today" aria-labelledby="today-label">
+      <h2 class="today-label" id="today-label">今天</h2>
+      <div class="tiles" id="tiles">
+        <article class="tile skeleton"></article>
+        <article class="tile skeleton"></article>
+        <article class="tile skeleton"></article>
+        <article class="tile skeleton"></article>
+        <article class="tile skeleton"></article>
+      </div>
+    </section>
+
     <main class="dashboard-grid">
       <div class="dashboard-main">
         <section class="panel" id="day-panel">
@@ -54,13 +65,6 @@
           <div id="day" class="day">
             <div class="skeleton skeleton-block"></div>
           </div>
-        </section>
-
-        <section class="tiles" id="tiles" aria-label="关键指标">
-          <article class="tile skeleton"></article>
-          <article class="tile skeleton"></article>
-          <article class="tile skeleton"></article>
-          <article class="tile skeleton"></article>
         </section>
 
         <div class="cols-2" id="clinical-grid">
@@ -109,8 +113,9 @@
           <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
         </section>
 
-        <section class="panel" id="research-panel">
-          <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>研究数据导出</h2></div>
+        <details class="panel more" id="more-panel">
+          <summary><span class="ic" style="--i:url(/icons/cpu.svg)"></span>更多<span class="more-hint">研究数据导出</span><span class="chev"></span></summary>
+          <h3 class="more-h">研究数据导出</h3>
           <form id="research-form" class="research">
             <p class="muted">把戒指原始数据导出为 CSV 文件(每次心跳或每 30 秒一行),使用校正后的时间。与 iOS 导出的文件相同。</p>
             <label for="rx-start">开始</label><input id="rx-start" type="datetime-local" required>
@@ -128,7 +133,7 @@
             <button class="btn-text" id="rx-mark" type="button">立即标记</button>
             <p id="rx-status" class="muted" role="status"></p>
           </form>
-        </section>
+        </details>
       </aside>
     </main>
 

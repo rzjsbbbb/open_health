@@ -1013,3 +1013,43 @@ body.page-open { overflow: hidden; }
 .research fieldset { border: 1px solid var(--line); border-radius: var(--radius-sm); display: grid; gap: 4px; padding: 8px 10px; margin: 4px 0; }
 .research legend { color: var(--muted); padding: 0 4px; }
 .research .muted { color: var(--muted); margin: 0; }
+
+/* ── readability ───────────────────────────────────────────
+   The 「今天」 overview, the folded 「更多」 section, and larger, darker small type.
+   Chinese reads poorly in tiny tracked capitals, so labels drop the letter-spacing
+   and uppercase and grow to 12.5–14 px; the faint grey is one step darker. */
+:root { --faint: #7f858e; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --faint: #8a909a; } }
+:root[data-theme="dark"] { --faint: #8a909a; }
+
+.today { margin: 0 0 20px; }
+.today-label { margin: 0 0 10px 2px; font-size: 15px; font-weight: 600; color: var(--text); }
+.today .tiles { grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; }
+@media (max-width: 1100px) { .today .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .today .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile .sub { font-size: 13px; color: var(--muted); margin-top: auto; padding-top: 6px; }
+
+.more > summary {
+  display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; user-select: none;
+  font-size: 14px; font-weight: 600; color: var(--muted);
+}
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary:hover { color: var(--text); }
+.more .more-hint { font-weight: 400; font-size: 12.5px; color: var(--faint); }
+.more .chev { width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); margin-left: auto; transition: transform 0.2s ease; }
+.more[open] .chev { transform: rotate(-135deg); }
+.more-h { margin: 16px 0 10px; font-size: 14px; font-weight: 600; color: var(--text); }
+
+.brief-label, .panel-head h2, .tile .label, .dp-tag, .ss-k, .subhead, .dh-advanced > summary,
+.sd-card-value span, .sd-value span { letter-spacing: 0.02em; text-transform: none; }
+.brief-label { font-family: var(--sans); font-size: 13px; }
+.digest { font-size: 17px; color: var(--text); }
+.panel-head h2 { font-size: 14px; color: var(--text); }
+.tile .label { font-size: 13px; color: var(--muted); }
+.dp-tag { font-size: 13px; color: var(--text); }
+.dh-advanced > summary { font-size: 13px; }
+.dp-meta, .legend, .kv .k, .ss-k, .tl-label, .cmp-cap, .scale, .hr-note, .hr-empty, .live-status { font-size: 12.5px; }
+.met-axis span, .tl-axis span { font-size: 11px; }
+.subhead { font-size: 13px; color: var(--muted); }
+.dh-stat .k { font-size: 12.5px; letter-spacing: 0.02em; text-transform: none; }
+.stream .s-name, .insight .why { font-size: 13px; }

@@ -222,29 +222,41 @@ const relAge = (diff) => {
   return { short: "相当", long: "与实际年龄相当" };
 };
 
-function renderTiles(d) {
+// The 「今天」 overview at the top: the five numbers worth a glance, each with a plain
+// status word, for the newest day (the same day and night the "Your day" card shows).
+function renderToday(d) {
   const box = $("tiles");
   box.innerHTML = "";
   box.classList.add("reveal");
-  const hv = d.vitals?.hrv || {}, rh = d.vitals?.rhr || {};
-  const n0 = (d.nights || [])[0] || {};
-  box.append(metricCard("HRV (RMSSD)", hv.latest, " ms", { deltaPct: hv.delta_pct, ref: hv.baseline, good: "up" }));
-  box.append(metricCard("静息心率", rh.latest, " bpm", { deltaPct: rh.delta_pct, ref: rh.baseline, good: "down" }));
-  const eff = n0.efficiency;
-  box.append(metricCard("睡眠效率", eff, "%", {
-    ref: 85, refLabel: "目标", good: "up",
+  const ymd = dayKeys(d)[0];
+  const now = new Date();
+  const todayYmd = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  $("today-label").textContent = !ymd || ymd === todayYmd ? "今天" : dayTitle(ymd);
+  const n = (ymd && nightForDay(d, ymd)) || {};
+
+  const asleepMin = n.metrics?.asleep_min;
+  const sleepH = asleepMin != null ? asleepMin / 60 : n.in_bed_h;
+  const eff = n.efficiency;
+  box.append(metricCard("睡眠", sleepH != null ? Math.round(sleepH * 10) / 10 : "—", " 小时", {
     status: eff == null ? null : eff >= 85 ? { label: "正常", kind: "ok" } : eff >= 75 ? { label: "一般", kind: "neutral" } : { label: "偏低", kind: "warn" },
+    sub: n.start ? `效率 ${num(eff)}% · ${esc(n.start)}–${esc(n.end)}` : "还没有睡眠记录",
   }));
-  const cv = d.cardio;
-  if (cv && cv.vascular_age != null) {
-    const diff = cv.vascular_age - cv.chronological_age;
-    box.append(metricCard("血管年龄", cv.vascular_age, " 岁", {
-      ref: cv.chronological_age, refLabel: "实际年龄", good: "down",
-      status: diff < -0.5 ? { label: "更年轻", kind: "ok" } : diff > 0.5 ? { label: "偏大", kind: "warn" } : { label: "相当", kind: "neutral" },
-    }));
-  } else {
-    box.append(metricCard("血管年龄", "—", "", { sub: cvaMissing(d).short }));
-  }
+
+  const hv = d.vitals?.hrv || {}, rh = d.vitals?.rhr || {};
+  box.append(metricCard("HRV", hv.latest, " ms", { deltaPct: hv.delta_pct, ref: hv.baseline, good: "up" }));
+  box.append(metricCard("静息心率", rh.latest, " bpm", { deltaPct: rh.delta_pct, ref: rh.baseline, good: "down" }));
+
+  const spo2 = n.spo2_mean;
+  const spo2On = (d.device?.measuring || []).some((m) => m.name === "SpO2" && m.on);
+  box.append(metricCard("血氧", spo2 ?? "—", spo2 != null ? "%" : "", {
+    status: spo2 == null ? null : spo2 >= 95 ? { label: "正常", kind: "ok" } : { label: "偏低", kind: "warn" },
+    sub: spo2 != null ? "夜间平均" : spo2On ? "戴着戒指睡一晚后显示" : "需在设备面板开启血氧",
+  }));
+
+  const ds = (d.activity_daily || {})[ymd];
+  box.append(metricCard("步数", ds ? Math.round(ds.steps || 0).toLocaleString() : "—", ds ? " 步" : "", {
+    sub: ds ? `活动消耗 ${Math.round(ds.active_kcal || 0)} 千卡` : "还没有活动数据",
+  }));
 }
 
 function hypnogram(stages) {
@@ -2317,7 +2329,7 @@ async function load() {
   $("digest").classList.add("reveal");
   $("digest").innerHTML = zh(d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
   renderActions(d);
-  renderTiles(d);
+  renderToday(d);
   HR_QUARTER_LOAD = null;
   renderDay(d);
   renderSleepDebt(d);

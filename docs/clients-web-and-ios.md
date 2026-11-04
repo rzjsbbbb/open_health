@@ -209,6 +209,11 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 
 ## Known gaps (web-only, not yet on iOS)
 
+- **「今天」 overview**: the web page opens with five large cards for the newest day (sleep
+  + efficiency, HRV, resting HR, SpO₂, steps), each with a status word (`renderToday`);
+  the research export is folded into a collapsed 「更多」 section at the bottom. iOS Home
+  keeps its own layout.
+
 - **Chinese UI**: the web dashboard is written in Chinese (zh-CN). On the main page, text
   the server sends in English (oura-summary is shared with the English iOS app: the
   digest, clock warnings, device-panel names, activity labels) is translated as it is
