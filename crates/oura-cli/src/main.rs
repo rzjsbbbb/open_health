@@ -517,7 +517,16 @@ async fn main() -> Result<()> {
         } => cmd_sleep_score(&cli, *tz_offset, csv.clone(), *json),
         Command::ReadinessScore { tz_offset, json } => cmd_readiness_score(&cli, *tz_offset, *json),
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
-        Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
+        Command::FeatureMode { feature, mode } => {
+            tokio::time::timeout(FEATURE_MODE_TIMEOUT, cmd_feature_mode(&cli, &key, feature, mode))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow!(
+                        "ring stopped responding; feature change abandoned after {} s",
+                        FEATURE_MODE_TIMEOUT.as_secs()
+                    ))
+                })
+        }
         Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
         Command::Dashboard {
             port,
@@ -1024,7 +1033,7 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
     let key = key
         .as_ref()
         .ok_or_else(|| anyhow!("sync requires --key-file (history events are auth-gated)"))?;
-    sync_pass(cli, key, sync_time).await.map(|_| ())
+    sync_pass(cli, key, sync_time, true).await.map(|_| ())
 }
 
 /// One full incremental sync over a connected, authenticated client: app-stream
@@ -1037,7 +1046,12 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
 /// between passes: SQLite folds the WAL back into `oura.db` when the last
 /// connection closes, and that file's mtime is what tells a running dashboard to
 /// rebuild its summary.
-async fn sync_once(cli: &Cli, client: &OuraClient<BleTransport>, sync_time: bool) -> Result<u32> {
+async fn sync_once(
+    cli: &Cli,
+    client: &OuraClient<BleTransport>,
+    sync_time: bool,
+    nudge_sleep: bool,
+) -> Result<u32> {
     client
         .setup_app_stream()
         .await
@@ -1058,7 +1072,10 @@ async fn sync_once(cli: &Cli, client: &OuraClient<BleTransport>, sync_time: bool
     }
     // Like the iOS app: ask the ring to postprocess its sleep before the drain, so a
     // finished night's bedtime_period lands in this sync instead of the next one.
-    let _ = client.check_sleep_analysis(false).await;
+    // `watch` asks less often (see SLEEP_NUDGE_EVERY).
+    if nudge_sleep {
+        let _ = client.check_sleep_analysis(false).await;
+    }
 
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
     let info = client.firmware().await.ok();
@@ -1135,16 +1152,26 @@ async fn sync_once(cli: &Cli, client: &OuraClient<BleTransport>, sync_time: bool
 /// which runs `sync` and holds the dashboard's BLE gate until it exits.
 const SYNC_PASS_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// How often `watch` asks the ring to analyse sleep. Each request makes the ring write
+/// a provisional bedtime period if you're still asleep — every 5 minutes that was a
+/// dozen revisions a night. Hourly still brings a finished night in soon after waking.
+const SLEEP_NUDGE_EVERY: Duration = Duration::from_secs(3600);
+
+/// Upper bound on `feature-mode`, which the dashboard's capability toggles run while
+/// holding its BLE gate: like a sync pass, a dropped link can leave its GATT write
+/// pending forever.
+const FEATURE_MODE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// One sync pass, which `sync` runs once and `watch` repeats: connect (bounded by the
 /// scan and connect deadlines), then authenticate and sync within
 /// [`SYNC_PASS_TIMEOUT`], then always disconnect — without waiting on a dead link —
 /// so a failed pass never leaves the ring's single peripheral link held. Returns the
 /// number of events received.
-async fn sync_pass(cli: &Cli, key: &[u8; 16], sync_time: bool) -> Result<u32> {
+async fn sync_pass(cli: &Cli, key: &[u8; 16], sync_time: bool, nudge_sleep: bool) -> Result<u32> {
     let client = connect(cli).await?;
     let pass = async {
         client.authenticate(key).await.context("authenticating")?;
-        sync_once(cli, &client, sync_time).await
+        sync_once(cli, &client, sync_time, nudge_sleep).await
     };
     let outcome = tokio::time::timeout(SYNC_PASS_TIMEOUT, pass)
         .await
@@ -1208,10 +1235,15 @@ async fn watch_loop(
     let base = Duration::from_secs(retry.max(1));
     let cap = Duration::from_secs(max_backoff.max(retry).max(1));
     let mut backoff = base;
+    let mut last_nudge: Option<std::time::Instant> = None;
     loop {
-        match sync_pass(cli, key, sync_time).await {
+        let nudge = last_nudge.is_none_or(|t| t.elapsed() >= SLEEP_NUDGE_EVERY);
+        match sync_pass(cli, key, sync_time, nudge).await {
             Ok(events) => {
                 backoff = base;
+                if nudge {
+                    last_nudge = Some(std::time::Instant::now());
+                }
                 println!(
                     "[{}] pass ok: {events} events this pass; next in {interval}s.",
                     local_clock()

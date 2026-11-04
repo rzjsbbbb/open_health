@@ -2167,6 +2167,8 @@ function syncHint(msg) {
     return "戒指需要认证密钥。请用 --key-file 启动仪表盘。";
   if (/timed out|timeout/i.test(msg))
     return "蓝牙连接超时。确认戒指已唤醒且在附近,然后重试。";
+  if (/feature change abandoned/i.test(msg))
+    return "戒指没有响应,功能没有切换。请稍后再试。";
   if (/stopped responding/i.test(msg))
     return "戒指没有响应,这次同步已放弃(已同步的数据会保留)。请稍后再试。";
   return "同步失败:" + zh(msg);

@@ -314,6 +314,13 @@ unix LE + "phone") pairing the newest drained ds with the phone clock. This live
 
 ## Premature sleep ends → evidence-based model windows
 
+Each request for sleep analysis (`check_sleep_analysis`, sent on every sync by both
+clients) can make the ring write a provisional `bedtime_period` while you are still
+asleep, and later a longer revision of the same night whose start may be re-detected a
+few seconds off. The shared summary folds overlapping periods whose wall-clock starts
+are within 30 minutes into one night, keeping the most complete revision
+(`SAME_NIGHT_START_S`). `oura watch` asks at most hourly (`SLEEP_NUDGE_EVERY`).
+
 The ring can close a raw `bedtime_period` during a brief awakening even though sleep
 continues. `oura-summary::normalize_bed_periods` repairs the model boundary in two stages:
 
@@ -429,7 +436,8 @@ stalled or disconnected child before releasing the gate. Hardware/firmware live
 HR support still depends on the pinned BLE implementation. `oura sync` abandons a
 pass that stops responding after 10 minutes (that pinned implementation has no
 deadline on GATT writes), so a wedged link can't hold the Sync button, and with it
-the gate, forever. `oura watch` is a
+the gate, forever; `oura feature-mode` (the capability toggles) is capped at two
+minutes for the same reason. `oura watch` is a
 separate process outside that gate; it contends for the same single BLE link, so
 an action started mid-pass connects once the pass lets go, and a pass that finds
 the ring busy backs off and retries.

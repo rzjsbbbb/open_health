@@ -576,6 +576,9 @@ struct BedPeriod {
 
 const MAX_BED_BREAK_DS: i64 = 60 * 60 * 10;
 const MAX_SLEEP_SIGNAL_EXTENSION_DS: i64 = 3 * 60 * 60 * 10;
+/// Two overlapping bedtime periods whose wall-clock starts are this close are
+/// revisions of one night (see the bedtime_period collection in `build_summary`).
+const SAME_NIGHT_START_S: f64 = 30.0 * 60.0;
 const EPOCH_ALIGNMENT_SLACK_S: f64 = 5.0 * 60.0;
 const PULSE_BURST_GAP_DS: i64 = 2 * 60 * 10;
 const MAX_PULSE_CONTINUATION_GAP_DS: i64 = 15 * 60 * 10;
@@ -2135,13 +2138,25 @@ pub fn build_summary(
                 if let (Some(s), Some(e)) =
                     (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
                 {
+                    // One night arrives as several revisions: the ring rewrites its
+                    // bedtime period whenever it is asked to analyse sleep (each sync),
+                    // the end moving later and the start sometimes re-detected a few
+                    // seconds off (01:43:31 vs 01:44:01 one night, which used to leave
+                    // a phantom second night). Overlapping periods whose wall-clock
+                    // starts are within SAME_NIGHT_START_S are one night; the most
+                    // complete revision (latest end) supplies the start.
+                    let start_unix = unix_s_at(s, *cu);
                     match raw_beds.iter_mut().find(|bed| {
-                        bed.start_ds == s
-                            && (unix_s_at(bed.start_ds, bed.captured_unix) - unix_s_at(s, *cu))
-                                .abs()
-                                <= 5.0 * 60.0
+                        (unix_s_at(bed.start_ds, bed.captured_unix) - start_unix).abs()
+                            <= SAME_NIGHT_START_S
+                            && s <= bed.end_ds
+                            && bed.start_ds <= e
                     }) {
                         Some(bed) => {
+                            if e > bed.end_ds {
+                                bed.start_ds = s;
+                                bed.raw_start_ds = s;
+                            }
                             bed.end_ds = bed.end_ds.max(e);
                             bed.raw_end_ds = bed.raw_end_ds.max(e);
                             bed.captured_unix = bed.captured_unix.max(*cu);
@@ -4033,6 +4048,63 @@ mod tests {
         assert!(stages.contains(&1));
         assert!(stages.contains(&2));
         assert!(stages.contains(&4));
+    }
+
+    #[test]
+    fn bedtime_revisions_of_one_night_are_one_night() {
+        // A watch that asks for sleep analysis every pass makes the ring write a growing
+        // revision of the same night each time, its start sometimes re-detected 30 s off.
+        // They must collapse to the most complete revision; a separate night stays.
+        let dir = std::env::temp_dir().join(format!(
+            "oura-bedtime-revisions-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("oura.db");
+        drop(Store::open(&db).unwrap());
+
+        let base_unix = 1_780_000_000i64;
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1000, X'00000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{base_unix}}}"), base_unix],
+        )
+        .unwrap();
+        // (start, end, captured offset): five revisions of one night, then the next night
+        for (s, e, cap) in [
+            (10_000i64, 40_000i64, 4_000i64),
+            (10_300, 60_000, 6_000),
+            (10_000, 80_000, 8_000),
+            (10_300, 90_000, 9_000),
+            (10_000, 298_000, 30_000),
+            (874_000, 1_162_000, 117_000),
+        ] {
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 118, 'bedtime_period', ?1, X'00', ?2, ?3)",
+                rusqlite::params![
+                    e,
+                    format!("{{\"bedtime_start_ds\":{s},\"bedtime_end_ds\":{e}}}"),
+                    base_unix + cap
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let sum = build_summary(&db, 0.0, &NoModelRunner).unwrap();
+        let nights = sum["nights"].as_array().unwrap();
+        assert_eq!(nights.len(), 2, "{nights:?}");
+        let first = nights.iter().find(|n| n["raw_start_ds"] == 10_000).expect("first night");
+        assert_eq!(first["raw_end_ds"], 298_000);
+        assert!(nights.iter().any(|n| n["raw_start_ds"] == 874_000));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
