@@ -2,6 +2,9 @@
 /.venv/
 /.env
 *.db
+# SQLite's WAL sidecars hold the same health data until a checkpoint.
+*.db-wal
+*.db-shm
 *.sqlite
 *.key
 *.hex

@@ -14,7 +14,7 @@ and on-device analysis.
 
 <p align="center"><sub>iOS · Overview, sleep and activity · Real data from a Ring 5, July 2026</sub></p>
 
-The web dashboard also brings together local blood reports and DNA analysis.
+The web dashboard also brings together local DNA analysis.
 Ring communication and portable algorithms are powered by
 [open_oura](https://github.com/Th0rgal/open_oura).
 

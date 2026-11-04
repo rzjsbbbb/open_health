@@ -39,7 +39,7 @@ const fmtNum = (n) => (n == null ? "—" : n.toLocaleString());
 const signed = (n) => (n >= 0 ? "+" : "") + n;
 
 const CATEGORY_ORDER = ["nutrition", "fitness", "sleep", "appearance", "behaviour", "pharma", "health", "other"];
-const CAT_LABEL = { nutrition: "Nutrition & metabolism", fitness: "Fitness", sleep: "Sleep & circadian", appearance: "Traits & appearance", behaviour: "Mind & behaviour", pharma: "Medication response", health: "Health signals", other: "Other" };
+const CAT_LABEL = { nutrition: "营养与代谢", fitness: "运动能力", sleep: "睡眠与昼夜节律", appearance: "性状与外貌", behaviour: "心理与行为", pharma: "药物反应", health: "健康信号", other: "其他" };
 
 // ── state ────────────────────────────────────────────────────────────────────
 const state = {
@@ -67,7 +67,7 @@ async function refreshFiles(initial) {
     state.available = d.scores || [];
 
     state.genomes = genomes;
-    const KIND_TAG = { cnv: " · CNV (not scoreable)", sv: " · SV (not scoreable)" };
+    const KIND_TAG = { cnv: " · CNV(无法评分)", sv: " · SV(无法评分)" };
     const sel = clear($("file"));
     if (genomes.length) {
       for (const g of genomes) sel.append(h("option", { value: g.name }, `${g.name} · ${fmtSize(g.size)}${KIND_TAG[g.kind] || ""}`));
@@ -75,13 +75,13 @@ async function refreshFiles(initial) {
       const firstScoreable = genomes.find((g) => g.scoreable);
       if (!state.genome || !genomes.some((g) => g.name === state.genome)) state.genome = (firstScoreable || genomes[0]).name;
       sel.value = state.genome;
-      $("genome-dir").textContent = dir ? `${genomes.length} in ${dir}` : `${genomes.length} file${genomes.length === 1 ? "" : "s"}`;
+      $("genome-dir").textContent = dir ? `${dir} 中有 ${genomes.length} 个` : `${genomes.length} 个文件`;
     } else {
-      sel.append(h("option", null, "no genome files"));
-      $("genome-dir").textContent = dir ? `none in ${dir}` : "";
+      sel.append(h("option", null, "没有基因组文件"));
+      $("genome-dir").textContent = dir ? `${dir} 中没有` : "";
       showEmpty(d.error || (dir
-        ? `No <code>*.vcf.gz</code> in <code>${esc(dir)}</code>. Point the explorer elsewhere with <code>oura dashboard --dna-files &lt;dir&gt;</code> or <code>$OURA_DNA_FILES</code>.`
-        : "No genome directory."));
+        ? `<code>${esc(dir)}</code> 里没有 <code>*.vcf.gz</code> 文件。可以用 <code>oura dashboard --dna-files &lt;目录&gt;</code> 或 <code>$OURA_DNA_FILES</code> 指定其他目录。`
+        : "没有基因组目录。"));
     }
 
     if (initial) {
@@ -95,7 +95,7 @@ async function refreshFiles(initial) {
     renderPicker();
     if (genomes.length) loadReport();
   } catch (e) {
-    showEmpty("Couldn't reach the DNA API.");
+    showEmpty("连接不上 DNA 接口。");
   }
 }
 
@@ -103,14 +103,14 @@ async function refreshFiles(initial) {
 // fresh node — never appended to existing children — so there is no re-parse hazard.
 function showEmpty(msg) {
   clear($("scores"));
-  clear($("traits")).append(h("div", { class: "error", html: msg || "No genome files found." }));
+  clear($("traits")).append(h("div", { class: "error", html: msg || "没有找到基因组文件。" }));
 }
 
 // ── score picker (the selector) ──────────────────────────────────────────────
 function renderPicker() {
   const box = clear($("score-picker"));
   if (!state.available.length) {
-    box.append(h("div", { class: "dna-hint" }, "No scores yet — add one from the PGS Catalog below."));
+    box.append(h("div", { class: "dna-hint" }, "还没有评分,可以在下面从 PGS Catalog 添加。"));
   }
   for (const s of state.available) box.append(pickerRow(s));
   updateHint();
@@ -126,10 +126,10 @@ function pickerRow(s) {
   });
 
   const isPgs = s.source === "pgs";
-  const badge = h("span", { class: `dna-badge ${isPgs ? "pgs" : "builtin"}` }, isPgs ? "PGS" : "demo");
+  const badge = h("span", { class: `dna-badge ${isPgs ? "pgs" : "builtin"}` }, isPgs ? "PGS" : "示例");
   const meta = [];
   if (isPgs && s.id) meta.push(h("a", { href: `https://www.pgscatalog.org/score/${s.id}/`, target: "_blank", rel: "noopener", onclick: (e) => e.stopPropagation() }, s.id));
-  if (s.variants != null) meta.push(`${fmtNum(s.variants)} variants`);
+  if (s.variants != null) meta.push(`${fmtNum(s.variants)} 个变异`);
   if (s.weight_type && s.weight_type !== "NR") meta.push(s.weight_type);
   if (s.build) meta.push(s.build);
 
@@ -149,7 +149,7 @@ function interpose(items, sep) {
 
 function updateHint() {
   const n = state.selected.size;
-  $("scores-hint").textContent = n ? `${n} selected` : "none selected";
+  $("scores-hint").textContent = n ? `已选 ${n} 个` : "未选择";
 }
 
 // ── PGS Catalog fetch ────────────────────────────────────────────────────────
@@ -157,16 +157,16 @@ async function fetchPgs() {
   const id = $("pgs-id").value.trim().toUpperCase();
   const status = $("add-status");
   const btn = $("add-btn");
-  if (!/^PGS\d{6,9}$/.test(id)) { status.className = "dna-add-status err"; status.textContent = "Enter a PGS Catalog ID like PGS000004."; return; }
+  if (!/^PGS\d{6,9}$/.test(id)) { status.className = "dna-add-status err"; status.textContent = "请输入 PGS Catalog ID,例如 PGS000004。"; return; }
   btn.disabled = true;
   status.className = "dna-add-status busy";
-  status.textContent = `Fetching ${id} from the PGS Catalog…`;
+  status.textContent = `正在从 PGS Catalog 获取 ${id}…`;
   try {
     const d = await (await postDash("/api/dna/fetch", { pgs_id: id })).json();
-    if (!d.ok) { status.className = "dna-add-status err"; status.textContent = d.message || "Fetch failed."; btn.disabled = false; return; }
+    if (!d.ok) { status.className = "dna-add-status err"; status.textContent = d.message || "获取失败。"; btn.disabled = false; return; }
     status.className = "dna-add-status ok";
     const v = d.meta && d.meta.variants_number;
-    status.textContent = `Added ${id}${d.meta && d.meta.trait_reported ? " — " + d.meta.trait_reported : ""}${v ? ` (${fmtNum(v)} variants)` : ""}.`;
+    status.textContent = `已添加 ${id}${d.meta && d.meta.trait_reported ? "(" + d.meta.trait_reported + ")" : ""}${v ? `,共 ${fmtNum(v)} 个变异` : ""}。`;
     $("pgs-id").value = "";
     // re-list, auto-select the newly fetched score, and re-score
     await refreshFiles(false);
@@ -174,14 +174,14 @@ async function fetchPgs() {
     if (added) { state.selected.add(added.key); renderPicker(); loadReport(); }
   } catch (e) {
     status.className = "dna-add-status err";
-    status.textContent = "Fetch failed (network or server error).";
+    status.textContent = "获取失败(网络或服务器错误)。";
   } finally {
     btn.disabled = false;
   }
 }
 
 // ── report ───────────────────────────────────────────────────────────────────
-const KIND_NAME = { cnv: "copy-number (CNV)", sv: "structural-variant (SV)" };
+const KIND_NAME = { cnv: "拷贝数变异(CNV)", sv: "结构变异(SV)" };
 
 async function loadReport() {
   if (!state.genome) return;
@@ -195,9 +195,9 @@ async function loadReport() {
     clear($("traits"));
     clear($("scores")).append(
       h("div", { class: "dna-notice" },
-        h("b", null, `This is a ${KIND_NAME[g.kind] || g.kind} file.`),
-        " It lists large rearrangements, not the single-base genotypes that traits and polygenic scores need. ",
-        "Pick the ", h("b", null, "SNP / indel"), " file from the Genome menu — that's the one with your per-position calls."));
+        h("b", null, `这是一个${KIND_NAME[g.kind] || g.kind}文件。`),
+        "它记录的是大片段重排,而不是性状和多基因评分需要的单碱基基因型。",
+        "请在「基因组」菜单里选择 ", h("b", null, "SNP / indel"), " 文件,里面才有你每个位置的基因型。"));
     return;
   }
 
@@ -212,19 +212,19 @@ async function loadReport() {
     if (d.error) { showEmpty(esc(d.error)); return; }
     $("build").textContent = d.build || "GRCh38";
     const foundCount = (d.traits || []).filter((t) => t.found && !t.no_call).length;
-    $("foot-meta").textContent = `${foundCount}/${d.traits_total} traits · ${d.applied_scores} score${d.applied_scores === 1 ? "" : "s"} · ${state.genome}`;
+    $("foot-meta").textContent = `${foundCount}/${d.traits_total} 个性状 · ${d.applied_scores} 个评分 · ${state.genome}`;
     renderScores(d.scores || []);
     renderTraits(d.traits || []);
     $("traits").dataset.loaded = "1";
   } catch (e) {
-    if (reqId === state.reqId) showEmpty("Couldn't load the report.");
+    if (reqId === state.reqId) showEmpty("报告加载失败。");
   }
 }
 
 function renderScores(scores) {
   const box = clear($("scores"));
   if (!scores.length) {
-    box.append(h("div", { class: "dna-hint" }, "No scores selected. Tick one above, or add a PGS Catalog score."));
+    box.append(h("div", { class: "dna-hint" }, "没有选择评分。在上面勾选一个,或者添加一个 PGS Catalog 评分。"));
     return;
   }
   for (const s of scores) box.append(scoreCard(s));
@@ -236,7 +236,7 @@ function scoreCard(s) {
   // header: title + source line, and a qualitative band pill (illustrative only)
   const source = interpose([
     isPgs && s.id ? extLink(`https://www.pgscatalog.org/score/${s.id}/`, s.id) : null,
-    isPgs ? "PGS Catalog" : "illustrative",
+    isPgs ? "PGS Catalog" : "示例",
     s.genome_build || null,
   ].filter(Boolean), " · ");
   const head = h("div", { class: "dna-score-head" },
@@ -246,7 +246,7 @@ function scoreCard(s) {
     s.band ? pill(s.band.label, s.band.magnitude) : null);
 
   // headline value
-  const scaleNote = s.log_scaled ? "log-odds sum" : (isPgs ? "weighted sum" : "score");
+  const scaleNote = s.log_scaled ? "对数比值比之和" : (isPgs ? "加权和" : "分数");
   const value = h("div", { class: "dna-score-value" }, h("b", null, s.value), h("span", null, scaleNote));
 
   // gauge fill means two different things — label it honestly for each:
@@ -255,15 +255,15 @@ function scoreCard(s) {
   const pct = Math.max(2, Math.min(100, (s.fraction || 0) * 100));
   const gauge = h("div", { class: "gauge dna-score-gauge" }, h("i", { style: `width:${pct}%` }));
   const scale = s.metric === "coverage"
-    ? h("div", { class: "scale" }, h("span", null, "coverage"), h("span", null, `${fmtNum(s.matched)}/${fmtNum(s.total)} variants read`))
-    : h("div", { class: "scale" }, h("span", null, "lower"), h("span", null, "higher"));
+    ? h("div", { class: "scale" }, h("span", null, "覆盖率"), h("span", null, `读到 ${fmtNum(s.matched)}/${fmtNum(s.total)} 个变异`))
+    : h("div", { class: "scale" }, h("span", null, "较低"), h("span", null, "较高"));
 
   // rigor stats (matched / excluded / weighting) — the SNP counts live here, not the gauge
   const excluded = (s.ambiguous || 0) + (s.mismatched || 0);
   const stats = h("div", { class: "dna-stats" },
-    statChip("matched", `${fmtNum(s.matched)}/${fmtNum(s.total)}`),
-    excluded ? statChip("excluded", fmtNum(excluded), `${s.ambiguous} strand-ambiguous + ${s.mismatched} allele mismatch`) : null,
-    statChip("weights", s.log_scaled ? `${s.weight_type} → ln` : (s.weight_type || "NR")));
+    statChip("已匹配", `${fmtNum(s.matched)}/${fmtNum(s.total)}`),
+    excluded ? statChip("已排除", fmtNum(excluded), `${s.ambiguous} 个链方向不明 + ${s.mismatched} 个等位基因不匹配`) : null,
+    statChip("权重", s.log_scaled ? `${s.weight_type} → ln` : (s.weight_type || "NR")));
 
   const card = h("div", { class: "dna-score" }, head, value, gauge, scale, stats);
 
@@ -274,13 +274,13 @@ function scoreCard(s) {
       chips.append(h("span", { class: "dna-chip " + (c.contribution >= 0 ? "up" : "down") },
         `${c.rsid} ${c.dosage}×${c.effect_allele} ${signed(c.contribution)}`));
     }
-    card.append(h("div", { class: "dna-contribs-label" }, "Largest contributors in your genome"), chips);
+    card.append(h("div", { class: "dna-contribs-label" }, "你的基因组中贡献最大的位点"), chips);
   }
 
   if (s.note) card.append(h("div", { class: "dna-score-note" }, s.note));
   if (isPgs) {
     card.append(h("div", { class: "dna-score-caveat" },
-      "A raw polygenic sum has no absolute meaning without an ancestry-matched reference distribution (not shipped). Read it as your relative genetic load for this trait, never as a diagnosis or percentile."));
+      "没有祖源匹配的参考分布(这里未附带),原始多基因总分没有绝对意义。请把它理解为你在这个性状上的相对遗传负荷,而不是诊断或百分位。"));
   }
   return card;
 }
@@ -317,9 +317,9 @@ function traitCard(t) {
 
   let body = null;
   if (found && interp) body = interp.note ? h("div", { class: "dna-card-sub" }, interp.note) : null;
-  else if (t.no_call) body = h("div", { class: "dna-card-sub" }, "No call at this position in your file.");
-  else if (!t.found) body = h("div", { class: "dna-card-sub" }, "Not present in this genome file.");
-  else body = h("div", { class: "dna-card-sub" }, "Genotype not in the catalog table.");
+  else if (t.no_call) body = h("div", { class: "dna-card-sub" }, "你的文件在这个位置没有检出结果。");
+  else if (!t.found) body = h("div", { class: "dna-card-sub" }, "这个基因组文件里没有这个位点。");
+  else body = h("div", { class: "dna-card-sub" }, "目录里没有这个基因型的解读。");
 
   const rsid = t.source_url ? extLink(t.source_url, t.rsid) : t.rsid;
   const meta = h("div", { class: "dna-card-rs" }, rsid, ` · chr${t.chrom}:${t.pos}`);
@@ -336,25 +336,25 @@ async function runLookup() {
   const q = $("q").value.trim();
   const out = clear($("q-result"));
   if (!q) return;
-  if (!state.genome) { out.append(h("div", { class: "error" }, "Pick a genome first.")); return; }
-  out.append(h("div", { class: "dna-hint" }, `Searching ${state.genome}…`));
+  if (!state.genome) { out.append(h("div", { class: "error" }, "请先选择一个基因组。")); return; }
+  out.append(h("div", { class: "dna-hint" }, `正在 ${state.genome} 中搜索…`));
   try {
     const d = await (await getDash(`/api/dna/lookup?file=${encodeURIComponent(state.genome)}&q=${encodeURIComponent(q)}`)).json();
     clear(out);
     if (d.error) { out.append(h("div", { class: "error" }, d.error)); return; }
-    if (!d.found) { out.append(h("div", { class: "dna-hint" }, `No record for “${q}” in this file. (Whole-genome files can omit non-variant sites.)`)); return; }
+    if (!d.found) { out.append(h("div", { class: "dna-hint" }, `这个文件里没有「${q}」的记录。(全基因组文件可能省略了没有变异的位点。)`)); return; }
     out.append(variantCard(d.variant, d.annotation));
   } catch (e) {
-    clear(out).append(h("div", { class: "error" }, "Lookup failed."));
+    clear(out).append(h("div", { class: "error" }, "查询失败。"));
   }
 }
 
 function variantCard(v, ann) {
-  const name = ann && ann.trait ? ann.trait : (v.rsid && v.rsid !== "." ? v.rsid : "Variant");
+  const name = ann && ann.trait ? ann.trait : (v.rsid && v.rsid !== "." ? v.rsid : "变异");
   const rec = h("div", { class: "dna-rec" },
     h("div", { class: "dna-rec-head" },
       h("div", { class: "dna-rec-name" }, name),
-      h("div", { class: "dna-geno" }, v.no_call ? "no call" : v.key)));
+      h("div", { class: "dna-geno" }, v.no_call ? "未检出" : v.key)));
 
   if (ann && ann.interp) rec.append(pill(ann.interp.label, ann.interp.magnitude));
   rec.append(h("div", { class: "dna-rec-meta" }, `chr${v.chrom}:${v.pos} · ${v.rsid} · REF ${v.ref} / ALT ${v.alt}`));

@@ -16,7 +16,82 @@ const num = (v, d = "—") => (v == null || Number.isNaN(v) ? d : v);
 const icon = (name, cls = "") => `<span class="ic ${cls}" style="--i:url(/icons/${name}.svg)"></span>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const cap = (s) => esc(s).replace(/^./, (c) => c.toUpperCase());
-const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(Math.round(n)));
+const kfmt = (n) => (n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, "") + "万" : Math.round(n).toLocaleString());
+
+// ── Chinese UI ──────────────────────────────────────────────
+// The page's own copy is Chinese. Text that comes from the server (oura-summary is
+// shared with the English iOS app) is translated here as it is shown: fixed names by
+// lookup, the few templated sentences (digest, clock warnings, sync result, errors) by
+// pattern. Anything unrecognised is shown as sent.
+const ZH_TERMS = {
+  // device panel: insights (with their status and reason), data streams, capabilities
+  "Sleep stages": "睡眠分期", "Apnea / breathing": "呼吸暂停 / 呼吸", "Cardiovascular age": "心血管年龄",
+  "SpO2": "血氧", "Activity sessions": "活动记录", "HRV / resting HR": "HRV / 静息心率", "Steps": "步数",
+  "Stress / resilience": "压力 / 恢复力",
+  "needs overnight IBI": "需要夜间心跳间期数据", "enable cva_ppg": "需开启 cva_ppg", "enable spo2": "需开启 spo2",
+  "enable real_steps": "需开启 real_steps", "needs cloud scores": "需要云端评分",
+  live: "可用", gated: "暂不可用",
+  "Blood oxygen": "血氧", "Heart beats": "心跳", "Exercise HR": "运动心率", "Motion": "动作",
+  "Skin temp": "皮肤温度", "Cardio PPG": "心血管 PPG",
+  "Daytime HR": "日间心率", "Real steps": "实时步数", "Cardio PPG (CVA)": "心血管 PPG(CVA)",
+  // sleep-debt level
+  high: "偏高", moderate: "中等", low: "较低", none: "无",
+};
+const zhSpan = (n, unit) => `${n} ${unit === "days" ? "天" : "小时"}`;
+const ZH_RULES = [
+  // make_digest: "HRV -15%, resting HR -2 bpm. Recovery dipping, take it easy."
+  [/resting HR ([+-]?\d+) bpm/, "静息心率 $1 bpm"],
+  [/, (?=静息心率)/, ","],
+  [/\. Recovering well\.$/, "。恢复良好。"],
+  [/\. Recovery dipping, take it easy\.$/, "。恢复有所下降,今天放松一点。"],
+  [/^Synced\. Not enough history yet for trends\.$/, "已同步。历史数据还不够,暂时看不出趋势。"],
+  // clock warnings (ring_time::UndatedReason::warning_message and build_summary)
+  [/^(\d+) nights? \[missing_anchor\] could not be placed in time\b.*$/,
+    "有 $1 晚 [missing_anchor] 暂时无法确定时间:戒指这次开机后还没有记录到时间同步或 RTC 时间锚点。趁戒指还没重启时同步一次,就能补上时间。"],
+  [/^(\d+) nights? \[missing_anchor\] came from an earlier boot epoch\b.*$/,
+    "有 $1 晚 [missing_anchor] 来自戒指的上一次开机,那次开机在记录到任何时间同步或 RTC 时间锚点之前就结束了。现有数据无法恢复,再次同步也无法为之前的开机补上时间。"],
+  [/^(\d+) nights? \[accelerated_counter\].*$/,
+    "有 $1 晚 [accelerated_counter] 落在两个时间锚点之间、戒指计数器比实际时间走得快的区间里。现有数据无法恢复,再次同步也修复不了历史上的计数器跳变。"],
+  [/^(\d+) nights? \[ambiguous_reboot_stall\].*$/,
+    "有 $1 晚 [ambiguous_reboot_stall] 落在一段时钟停滞区间内的多次重启之间(实际时间超过了计数器时间)。现有数据无法把丢失的时间分配到各次重启,再次同步也解决不了。"],
+  [/^About (\d+) (days|hours) of current-boot ring history \[missing_anchor\].*$/,
+    (_, n, u) => `戒指这次开机后约有 ${zhSpan(n, u)}的历史数据 [missing_anchor] 还没有时间锚点,暂时无法放到日历上。趁戒指还没重启时同步一次,就能补上时间。`],
+  [/^About (\d+) (days|hours) of earlier-boot ring history \[missing_anchor\].*$/,
+    (_, n, u) => `戒指上一次开机期间约有 ${zhSpan(n, u)}的历史数据 [missing_anchor] 是在一次没有时间锚点的重启前记录的。现有数据无法恢复,再次同步也无法为之前的开机补上时间。`],
+  // the last line of `oura sync`, shown after the Sync button
+  [/^Done: (\d+) events received, (\d+) new rows, next cursor (\d+)\.$/, "同步完成:收到 $1 条事件,新增 $2 条(游标 $3)。"],
+  // server errors the page passes through
+  [/^dashboard was started without --key-file$/, "仪表盘启动时没有指定 --key-file。"],
+  [/^auth key must be exactly 16 bytes of hex$/, "认证密钥必须是 16 字节的十六进制。"],
+  [/^Live heart rate stopped or timed out\.$/, "实时心率已停止或超时。"],
+  [/^Ring is busy; wait for the current operation to finish\.$/, "戒指正忙,请等当前操作完成。"],
+  // short dates the summary formats as "Wed 11-04"
+  [/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/, (w) => ({ Mon: "周一", Tue: "周二", Wed: "周三", Thu: "周四", Fri: "周五", Sat: "周六", Sun: "周日" })[w]],
+];
+const zh = (s) => {
+  if (s == null) return s;
+  const t = String(s).replace(/\s+/g, " ").trim();
+  if (Object.hasOwn(ZH_TERMS, t)) return ZH_TERMS[t];
+  return ZH_RULES.reduce((out, [re, rep]) => out.replace(re, rep), t);
+};
+// activity labels from Oura's activity model (tools/run_activity_model.py BEHAVIOR)
+const ZH_ACT = {
+  nothing: "无活动", badminton: "羽毛球", boxing: "拳击", crossCountrySkiing: "越野滑雪",
+  crossTraining: "交叉训练", cycling: "骑行", dance: "跳舞", elliptical: "椭圆机",
+  strengthTraining: "力量训练", hockey: "曲棍球", pilates: "普拉提", rowing: "划船",
+  running: "跑步", swimming: "游泳", walking: "步行", yoga: "瑜伽", golf: "高尔夫",
+  tennis: "网球", climbing: "攀岩", downhillSkiing: "高山滑雪", snowboarding: "单板滑雪",
+  hiking: "徒步", horsebackRiding: "骑马", volleyball: "排球", basketball: "篮球",
+  americanFootball: "美式橄榄球", soccer: "足球", baseball: "棒球", coreExercise: "核心训练",
+  cricket: "板球", HIIT: "HIIT", diving: "潜水", fitnessClass: "健身课", floorball: "福乐球",
+  gymnastics: "体操", handball: "手球", houseWork: "家务", iceSkating: "滑冰",
+  jumpingRope: "跳绳", martialArts: "武术", flexibility: "柔韧训练", mountainBiking: "山地骑行",
+  nordicWalking: "北欧式健走", stairExercise: "爬楼梯", stretching: "拉伸", surfing: "冲浪",
+  waterFitness: "水中健身", yardwork: "庭院劳动", padel: "板式网球", skateboarding: "滑板",
+  other: "其他", nap: "小睡", sleep: "睡眠", pause: "暂停", meditation: "冥想",
+  eating: "进食", relax: "放松", transport: "交通出行",
+};
+const zhAct = (label) => (!label ? "活动" : Object.hasOwn(ZH_ACT, label) ? ZH_ACT[label] : label);
 
 let CURRENT_PROFILE = null;
 let CURRENT_TZ = 0; // hours from UTC, as the summary reports it
@@ -101,16 +176,16 @@ function pill(label, kind) {
 // Normal / attention status from a delta% and which direction is healthy.
 function statusFor(deltaPct, good) {
   if (deltaPct == null) return null;
-  if (Math.abs(deltaPct) <= 5) return { label: "Normal", kind: "ok" };
+  if (Math.abs(deltaPct) <= 5) return { label: "正常", kind: "ok" };
   const improving = good === "up" ? deltaPct > 0 : deltaPct < 0;
-  if (improving) return { label: good === "up" ? "High" : "Low", kind: "ok" };
-  return { label: good === "up" ? "Low" : "Elevated", kind: "warn" };
+  if (improving) return { label: good === "up" ? "偏高" : "偏低", kind: "ok" };
+  return { label: good === "up" ? "偏低" : "升高", kind: "warn" };
 }
 
 // baseline comparison bar: current value as a fill, the reference (personal baseline
 // or target) as a marker, on a shared 0…(max×1.3) scale — the "your result vs
 // reference" pattern from clinical dashboards.
-function cmpBar(value, ref, unit, refLabel = "baseline") {
+function cmpBar(value, ref, unit, refLabel = "基线") {
   const hi = Math.max(value, ref) * 1.3 || 1;
   const wrap = el("div", "cmp");
   const track = el("div", "cmp-track");
@@ -142,9 +217,9 @@ function metricCard(label, value, unit, opts = {}) {
 
 const relAge = (diff) => {
   const a = Math.abs(Math.round(diff * 10) / 10);
-  if (diff < -0.05) return { short: `${a} yr younger`, long: `${a} ${a === 1 ? "year" : "years"} younger than` };
-  if (diff > 0.05) return { short: `${a} yr older`, long: `${a} ${a === 1 ? "year" : "years"} older than` };
-  return { short: "in line", long: "in line with" };
+  if (diff < -0.05) return { short: `年轻 ${a} 岁`, long: `比实际年龄年轻 ${a} 岁` };
+  if (diff > 0.05) return { short: `大 ${a} 岁`, long: `比实际年龄大 ${a} 岁` };
+  return { short: "相当", long: "与实际年龄相当" };
 };
 
 function renderTiles(d) {
@@ -154,21 +229,21 @@ function renderTiles(d) {
   const hv = d.vitals?.hrv || {}, rh = d.vitals?.rhr || {};
   const n0 = (d.nights || [])[0] || {};
   box.append(metricCard("HRV (RMSSD)", hv.latest, " ms", { deltaPct: hv.delta_pct, ref: hv.baseline, good: "up" }));
-  box.append(metricCard("Resting HR", rh.latest, " bpm", { deltaPct: rh.delta_pct, ref: rh.baseline, good: "down" }));
+  box.append(metricCard("静息心率", rh.latest, " bpm", { deltaPct: rh.delta_pct, ref: rh.baseline, good: "down" }));
   const eff = n0.efficiency;
-  box.append(metricCard("Sleep efficiency", eff, "%", {
-    ref: 85, refLabel: "target", good: "up",
-    status: eff == null ? null : eff >= 85 ? { label: "Normal", kind: "ok" } : eff >= 75 ? { label: "Fair", kind: "neutral" } : { label: "Low", kind: "warn" },
+  box.append(metricCard("睡眠效率", eff, "%", {
+    ref: 85, refLabel: "目标", good: "up",
+    status: eff == null ? null : eff >= 85 ? { label: "正常", kind: "ok" } : eff >= 75 ? { label: "一般", kind: "neutral" } : { label: "偏低", kind: "warn" },
   }));
   const cv = d.cardio;
   if (cv && cv.vascular_age != null) {
     const diff = cv.vascular_age - cv.chronological_age;
-    box.append(metricCard("Vascular age", cv.vascular_age, " yr", {
-      ref: cv.chronological_age, refLabel: "your age", good: "down",
-      status: diff < -0.5 ? { label: "Younger", kind: "ok" } : diff > 0.5 ? { label: "Older", kind: "warn" } : { label: "In line", kind: "neutral" },
+    box.append(metricCard("血管年龄", cv.vascular_age, " 岁", {
+      ref: cv.chronological_age, refLabel: "实际年龄", good: "down",
+      status: diff < -0.5 ? { label: "更年轻", kind: "ok" } : diff > 0.5 ? { label: "偏大", kind: "warn" } : { label: "相当", kind: "neutral" },
     }));
   } else {
-    box.append(metricCard("Vascular age", "—", "", { sub: cvaMissing(d).short }));
+    box.append(metricCard("血管年龄", "—", "", { sub: cvaMissing(d).short }));
   }
 }
 
@@ -258,11 +333,11 @@ function dayCard(d, ymd) {
     const sp = el("button", "day-part");
     sp.type = "button";
     sp.append(el("div", "dp-head",
-      `<span class="dp-tag">Sleep</span><span class="dp-meta">${esc(n.start || "—")}–${esc(n.end || "—")} · ${num(n.in_bed_h)}h</span><span class="dp-chev"></span>`));
+      `<span class="dp-tag">睡眠</span><span class="dp-meta">${esc(n.start || "—")}–${esc(n.end || "—")} · ${num(n.in_bed_h)} 小时</span><span class="dp-chev"></span>`));
     if (n.stages && n.stages.length) sp.append(hypnogram(n.stages));
     const comp = el("div", "breakdown");
     const seg = (l, v) => `<span>${l} <b>${num(v)}%</b></span>`;
-    comp.innerHTML = seg("Deep", n.deep_pct) + seg("Light", n.light_pct) + seg("REM", n.rem_pct) + seg("Awake", n.wake_pct);
+    comp.innerHTML = seg("深睡", n.deep_pct) + seg("浅睡", n.light_pct) + seg("REM", n.rem_pct) + seg("清醒", n.wake_pct);
     sp.append(comp);
     sp.addEventListener("click", () => openDayPage(d, ymd, "sleep"));
     card.append(sp);
@@ -271,9 +346,9 @@ function dayCard(d, ymd) {
   const ap = el("button", "day-part");
   ap.type = "button";
   const ds = (d.activity_daily || {})[ymd];
-  const stat = ds ? `${kfmt(ds.steps)} steps · ${Math.round(ds.active_kcal)} kcal` : "no activity totals";
+  const stat = ds ? `${kfmt(ds.steps)} 步 · ${Math.round(ds.active_kcal)} 千卡` : "暂无活动汇总";
   ap.append(el("div", "dp-head",
-    `<span class="dp-tag">Activity</span><span class="dp-meta">${stat}</span><span class="dp-chev"></span>`));
+    `<span class="dp-tag">活动</span><span class="dp-meta">${stat}</span><span class="dp-chev"></span>`));
   const prof = (d.activity_profile || {})[ymd];
   if (prof && prof.length > 1) ap.insertAdjacentHTML("beforeend", ridgeSvg(prof));
   const sessions = sessionsForDay(d, ymd);
@@ -284,7 +359,7 @@ function dayCard(d, ymd) {
       const ico = el("span", "ic");
       ico.style.setProperty("--i", `url(/icons/${actIcon(s.label)}.svg)`);
       const nm = el("span", "day-chip-name");
-      nm.textContent = s.label || "activity";
+      nm.textContent = zhAct(s.label);
       chip.append(ico, nm);
       chips.append(chip);
     });
@@ -297,7 +372,7 @@ function dayCard(d, ymd) {
   const hp = el("button", "day-part");
   hp.type = "button";
   hp.append(el("div", "dp-head",
-    `<span class="dp-tag">Heart rate</span><span class="dp-meta">loading…</span><span class="dp-chev"></span>`));
+    `<span class="dp-tag">心率</span><span class="dp-meta">加载中…</span><span class="dp-chev"></span>`));
   const strip = el("div", "day-hr");
   hp.append(strip);
   hp.addEventListener("click", () => openDayPage(d, ymd, "heart"));
@@ -315,16 +390,16 @@ function fillDayHr(ymd, meta, strip) {
     .then((j) => {
       if (j.error) throw new Error(j.error);
       const { bySlot, rows } = hrDaySlots(j, ymd);
-      if (!rows.length) { meta.textContent = "no readings yet"; return; }
+      if (!rows.length) { meta.textContent = "暂无读数"; return; }
       const r0 = Math.round;
       const low = Math.min(...rows.map((r) => r.low)), high = Math.max(...rows.map((r) => r.high));
       const latest = hrLatestOn(j, ymd);
-      meta.textContent = (latest != null ? `latest ${r0(latest)} bpm · ` : "") + `${r0(low)}–${r0(high)} bpm`;
+      meta.textContent = (latest != null ? `最新 ${r0(latest)} bpm · ` : "") + `${r0(low)}–${r0(high)} bpm`;
       strip.innerHTML =
         `<div class="day-hr-plot">${hrBinsSvg(bySlot, Math.max(0, low - 5), high + 5, 1000, 44, false)}</div>` +
         `<div class="met-axis">${[0, 6, 12, 18, 24].map((h) => `<span style="left:${(h / 24 * 100).toFixed(1)}%">${String(h).padStart(2, "0")}</span>`).join("")}</div>`;
     })
-    .catch(() => { meta.textContent = "couldn't load"; });
+    .catch(() => { meta.textContent = "加载失败"; });
 }
 
 function renderDay(d) {
@@ -339,20 +414,20 @@ function renderDay(d) {
   const clockNote = () => {
     if (!clockWarnings.length && !unanchored) return null;
     const note = el("div", "clock-note");
-    note.append(el("div", "clock-note-title", "Ring clock"));
-    for (const w of clockWarnings) note.append(el("p", null, esc(w)));
+    note.append(el("div", "clock-note-title", "戒指时钟"));
+    for (const w of clockWarnings) note.append(el("p", null, esc(zh(w))));
     if (unanchored && !clockWarnings.length) {
-      note.append(el("p", null, "Part of the ring's history has no time anchor, so it cannot be placed on the calendar yet."));
-      note.append(el("p", "clock-note-fix", "Run <code>oura sync</code> while the ring is still on its current boot to anchor it."));
+      note.append(el("p", null, "戒指的部分历史数据还没有时间锚点,暂时无法放到日历上。"));
+      note.append(el("p", "clock-note-fix", "趁戒指还没重启时运行一次 <code>oura sync</code>,就能补上时间。"));
     }
     return note;
   };
   if (!days.length) {
     box.append(el("div", "error", canSyncFix
-      ? "No dated days yet: the ring's clock hasn't been anchored for this data."
+      ? "还没有能确定日期的数据:这段数据的戒指时钟还没有锚定。"
       : clockWarnings.length
-        ? "No dated days yet: recorded nights could not be dated unambiguously."
-        : "No days yet. Wear the ring and sync."));
+        ? "还没有能确定日期的数据:记录到的夜晚无法准确确定日期。"
+        : "还没有数据。戴上戒指并同步。"));
     const note = clockNote();
     if (note) box.append(note);
     $("sleep-legend").hidden = true;
@@ -363,7 +438,7 @@ function renderDay(d) {
   box.append(dayCard(d, top));
   if (days.length > 1) {
     const btn = el("button", "more-toggle");
-    btn.textContent = `Show all ${days.length} days`;
+    btn.textContent = `查看全部 ${days.length} 天`;
     btn.addEventListener("click", () => openDaysBrowser(d, days));
     box.append(btn);
   }
@@ -373,14 +448,14 @@ function renderDay(d) {
 
 const debtDuration = (minutes) => {
   const m = Math.max(0, Math.round(minutes || 0));
-  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+  return m >= 60 ? `${Math.floor(m / 60)} 小时 ${m % 60} 分钟` : `${m} 分钟`;
 };
 const debtStateCopy = (state) => ({
-  high: "Your sleep debt is high right now. Prioritize several consistent nights with enough sleep.",
-  moderate: "You’ve built up a moderate amount of sleep debt. A few longer nights can help you recover.",
-  low: "You’re mostly meeting your sleep need, with a small amount left to recover.",
-  none: "You’ve met your sleep need consistently over the past two weeks.",
-}[state] || "You’ve met your sleep need consistently over the past two weeks.");
+  high: "你目前的睡眠债偏高。接下来几晚请规律作息,保证睡够。",
+  moderate: "你积累了中等程度的睡眠债。多睡几个长觉有助于恢复。",
+  low: "你基本满足了睡眠需求,只剩少量需要补回。",
+  none: "过去两周你一直睡够了。",
+}[state] || "过去两周你一直睡够了。");
 
 function sleepDebtSvg(sd, mode) {
   const values = (sd.days || []).map((x) => mode === "debt" ? x.cumulative_debt_min : x.total_sleep_min);
@@ -406,13 +481,13 @@ function openSleepDebt(sd) {
   }
   const valid = sd.valid;
   dlg.innerHTML = `<form method="dialog">
-    <div class="sd-detail-head"><div><h3>Sleep debt</h3><div class="dialog-sub">Past ${sd.window_days || 14} days</div></div><button class="dd-close" aria-label="Close">×</button></div>
-    ${valid ? `<div class="sd-value">${debtDuration(sd.debt_min)} <span>${esc(sd.state)}</span></div><p class="sd-copy">${debtStateCopy(sd.state)}</p>`
-      : `<div class="sd-value small">Not enough data yet</div><p class="sd-copy">${sd.valid_days || 0} of 5 sleep days available within the past 2 weeks.</p>`}
-    <div class="sd-tabs"><button type="button" data-mode="debt" class="active">Cumulative debt</button><button type="button" data-mode="sleep">Total sleep</button></div>
+    <div class="sd-detail-head"><div><h3>睡眠债</h3><div class="dialog-sub">过去 ${sd.window_days || 14} 天</div></div><button class="dd-close" aria-label="关闭">×</button></div>
+    ${valid ? `<div class="sd-value">${debtDuration(sd.debt_min)} <span>${esc(zh(sd.state))}</span></div><p class="sd-copy">${debtStateCopy(sd.state)}</p>`
+      : `<div class="sd-value small">数据还不够</div><p class="sd-copy">过去两周内有 ${sd.valid_days || 0} 天睡眠数据,至少需要 5 天。</p>`}
+    <div class="sd-tabs"><button type="button" data-mode="debt" class="active">累计睡眠债</button><button type="button" data-mode="sleep">总睡眠</button></div>
     <div class="sd-graph">${sleepDebtSvg(sd, "debt")}</div>
     <div class="sd-axis"><span>${esc((sd.days?.[0]?.date || "").slice(5))}</span><span>${esc((sd.days?.at(-1)?.date || "").slice(5))}</span></div>
-    <p class="subhead">How it works</p><p class="sd-copy">Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and your sleep need (${debtDuration(sd.need_h * 60)}) is personalized from your typical sleep over the past 3 months, ignoring unusually short or long days.</p>
+    <p class="subhead">计算方式</p><p class="sd-copy">睡眠债估算的是过去 14 天少睡的时间。总睡眠包括主睡眠和小睡,越近的日子权重越高;你的睡眠需求(${debtDuration(sd.need_h * 60)})根据你过去 3 个月的典型睡眠个性化计算,并排除异常短或异常长的日子。</p>
   </form>`;
   dlg.querySelectorAll(".sd-tabs button").forEach((button) => button.addEventListener("click", () => {
     dlg.querySelectorAll(".sd-tabs button").forEach((b) => b.classList.toggle("active", b === button));
@@ -424,10 +499,10 @@ function openSleepDebt(sd) {
 function renderSleepDebt(d) {
   const box = $("sleep-debt"), sd = d.sleep_debt;
   box.innerHTML = "";
-  if (!sd) { box.append(el("div", "error", "No sleep data yet.")); return; }
+  if (!sd) { box.append(el("div", "error", "还没有睡眠数据。")); return; }
   const button = el("button", "sd-card"); button.type = "button";
-  if (sd.valid) button.innerHTML = `<div class="sd-card-value">${debtDuration(sd.debt_min)} <span>${esc(sd.state)}</span></div><p>${debtStateCopy(sd.state)}</p><span class="sd-period">Past ${sd.window_days || 14} days · view details →</span>`;
-  else button.innerHTML = `<div class="sd-card-value pending">${sd.valid_days || 0} of 5 days available</div><p>5 days of sleep data are needed within the past 2 weeks.</p><span class="sd-period">View details →</span>`;
+  if (sd.valid) button.innerHTML = `<div class="sd-card-value">${debtDuration(sd.debt_min)} <span>${esc(zh(sd.state))}</span></div><p>${debtStateCopy(sd.state)}</p><span class="sd-period">过去 ${sd.window_days || 14} 天 · 查看详情 →</span>`;
+  else button.innerHTML = `<div class="sd-card-value pending">已有 ${sd.valid_days || 0} / 5 天</div><p>需要过去两周内至少 5 天的睡眠数据。</p><span class="sd-period">查看详情 →</span>`;
   button.addEventListener("click", () => openSleepDebt(sd)); box.append(button);
 }
 
@@ -435,24 +510,24 @@ function renderSleepDebt(d) {
 // calibrated decision + the biomarkers (breath / lowest HR / HRV / temp) that deviate
 // from your personal baseline. See docs/algorithms/illness-detection.md.
 const ILLNESS_COPY = {
-  NO_SIGNS: "No signs of illness. Your biometrics are within your normal range.",
-  MINOR_SIGNS: "Minor signs. A few biometrics are outside your usual range — worth an easy day.",
-  MAJOR_SIGNS: "Major signs. Several biometrics are elevated — your body may be fighting something.",
+  NO_SIGNS: "没有生病的迹象。你的各项生理指标都在正常范围内。",
+  MINOR_SIGNS: "有轻微迹象。少数指标超出了你的平常范围,今天可以放轻松一点。",
+  MAJOR_SIGNS: "有明显迹象。多项指标升高,你的身体可能正在对抗某种疾病。",
 };
 const ILLNESS_LIGHT = { NO_SIGNS: "ok", MINOR_SIGNS: "warn", MAJOR_SIGNS: "alert" };
 const BIOMARKER_LABEL = {
-  AverageBreath: "Breathing rate", LowestHeartRate: "Lowest heart rate",
-  AverageHrv: "HRV", TemperatureDeviation: "Body temperature",
+  AverageBreath: "呼吸频率", LowestHeartRate: "最低心率",
+  AverageHrv: "HRV", TemperatureDeviation: "体温",
 };
 const BIOMARKER_UNIT = {
-  AverageBreath: " br/min", LowestHeartRate: " bpm", AverageHrv: " ms", TemperatureDeviation: "°C",
+  AverageBreath: " 次/分", LowestHeartRate: " bpm", AverageHrv: " ms", TemperatureDeviation: "°C",
 };
 
 const cvaMissing = (d) => {
   const gated = (d.device?.insights || []).find((i) => i.name === "Cardiovascular age")?.status === "gated";
   return gated
-    ? { short: "needs cva_ppg on", long: "Cardiovascular age needs the cva_ppg feature on. Enable it, then sync overnight." }
-    : { short: "needs the CVA model", long: "Cardiovascular age needs the CVA model runner (Python + tools/run_cva_model.py); the ring's PPG data is already there." };
+    ? { short: "需开启 cva_ppg", long: "心血管年龄需要开启 cva_ppg 功能。开启后戴着戒指过夜并同步。" }
+    : { short: "需要 CVA 模型", long: "心血管年龄需要 CVA 模型运行环境(Python + tools/run_cva_model.py);戒指的 PPG 数据已经有了。" };
 };
 
 function renderIllness(d) {
@@ -462,36 +537,36 @@ function renderIllness(d) {
   // model-free radar (same choice as the iOS app's `symptomRadar`).
   const fromModel = !!d.illness?.available;
   const ill = fromModel ? d.illness : (d.symptoms || d.illness);
-  if (!ill) { box.append(el("div", "error", "Symptom radar needs a few nights of sleep data.")); return; }
+  if (!ill) { box.append(el("div", "error", "症状雷达需要几晚的睡眠数据。")); return; }
   // The runner emits snake_case, the core camelCase.
   const trafficLight = ill.traffic_light ?? ill.trafficLight;
   const daysWithData = ill.days_with_data ?? ill.daysWithData;
   if (!ill.available) {
-    const why = ill.status === "MISSING_LAST_NIGHT_SLEEP" ? "Last night's sleep is missing — wear the ring overnight and sync."
+    const why = ill.status === "MISSING_LAST_NIGHT_SLEEP" ? "缺少昨晚的睡眠数据,请戴着戒指过夜并同步。"
       : ill.status === "MISSING_SLEEP_DATA" ? (fromModel || d.illness
-        ? "Too many recent nights are missing (needs ≥ 7 of the last 14)."
-        : "Needs at least 7 nights of sleep to learn your baseline.")
-      : "Not enough history yet.";
+        ? "最近缺失的夜晚太多(过去 14 晚里至少需要 7 晚)。"
+        : "至少需要 7 晚睡眠数据来学习你的基线。")
+      : "历史数据还不够。";
     box.append(el("div", "error", why));
     return;
   }
   const light = ILLNESS_LIGHT[trafficLight] || "ok";
   const head = el("div", `il-status il-${light}`);
-  const label = { NO_SIGNS: "No signs", MINOR_SIGNS: "Minor signs", MAJOR_SIGNS: "Major signs" }[trafficLight] || "No result yet";
+  const label = { NO_SIGNS: "无迹象", MINOR_SIGNS: "轻微迹象", MAJOR_SIGNS: "明显迹象" }[trafficLight] || "暂无结果";
   head.innerHTML = `<span class="il-dot"></span><span class="il-label">${label}</span>`;
   box.append(head);
   const flagged = (ill.biomarkers || []).filter((b) => b.indicatesSymptoms);
   // The decision is the model's overall score, not a count of flags: a night can have
   // biometrics out of range and still not add up to strain.
   const copy = ill.status === "NO_SIGNS" && flagged.length
-    ? `No signs of illness. ${flagged.length === 1 ? "One biometric is" : `${flagged.length} biometrics are`} outside your usual range, but together they don't match the pattern of your body fighting something.`
+    ? `没有生病的迹象。有 ${flagged.length} 项指标超出了你的平常范围,但综合来看并不符合身体在对抗疾病的模式。`
     : ILLNESS_COPY[ill.status] || "";
   box.append(el("p", "il-copy", copy));
 
   if (flagged.length) {
     const list = el("div", "il-biomarkers");
     for (const b of flagged) {
-      const dir = b.reason === "ELEVATED" ? "↑ elevated" : "↓ decreased";
+      const dir = b.reason === "ELEVATED" ? "↑ 偏高" : "↓ 偏低";
       const unit = BIOMARKER_UNIT[b.type] || "";
       list.append(el("div", `il-bm il-${b.reason === "ELEVATED" ? "up" : "down"}`,
         `<span class="il-bm-name">${BIOMARKER_LABEL[b.type] || b.type}</span>` +
@@ -499,7 +574,7 @@ function renderIllness(d) {
     }
     box.append(list);
   }
-  const basis = fromModel ? `On-device illness model · ${daysWithData} of 30 days` : `Compared with your own baseline · ${daysWithData} nights`;
+  const basis = fromModel ? `本地疾病模型 · ${daysWithData}/30 天` : `与你自己的基线对比 · ${daysWithData} 晚`;
   box.append(el("div", "il-foot", `${basis} · ${esc(ill.date)}`));
 }
 
@@ -509,17 +584,17 @@ function renderCardio(d) {
   const vo2 = d.fitness?.vo2max;
   box.innerHTML = "";
   // VO₂max is model-free (from demographics), so it shows even without the CVA model.
-  const vo2Kv = vo2 != null ? el("div", "kv", `<div class="k">VO₂max estimate</div><div class="v">${vo2} ml/kg/min</div>`) : null;
+  const vo2Kv = vo2 != null ? el("div", "kv", `<div class="k">最大摄氧量(VO₂max)估算</div><div class="v">${vo2} ml/kg/min</div>`) : null;
   if (!cv || cv.vascular_age == null) {
     box.append(el("div", "error", cvaMissing(d).long));
     if (vo2Kv) { const kvs = el("div", "kvs"); kvs.append(vo2Kv); box.append(kvs); }
     return;
   }
-  box.append(el("div", "big-metric", `<span class="n">${cv.vascular_age}</span><span class="u">years vascular age</span>`));
-  box.append(el("div", "sub", `${relAge(cv.vascular_age - cv.chronological_age).long} your age (${cv.chronological_age})`));
+  box.append(el("div", "big-metric", `<span class="n">${cv.vascular_age}</span><span class="u">岁 · 血管年龄</span>`));
+  box.append(el("div", "sub", `${relAge(cv.vascular_age - cv.chronological_age).long}(实际年龄 ${cv.chronological_age} 岁)`));
   const kvs = el("div", "kvs");
-  kvs.append(el("div", "kv", `<div class="k">Pulse-wave velocity</div><div class="v">${cv.pwv_ms != null ? cv.pwv_ms + " m/s" : "—"}</div>`));
-  kvs.append(el("div", "kv", `<div class="k">Segments analysed</div><div class="v">${num(cv.segments)}</div>`));
+  kvs.append(el("div", "kv", `<div class="k">脉搏波速度</div><div class="v">${cv.pwv_ms != null ? cv.pwv_ms + " m/s" : "—"}</div>`));
+  kvs.append(el("div", "kv", `<div class="k">分析片段数</div><div class="v">${num(cv.segments)}</div>`));
   if (vo2Kv) kvs.append(vo2Kv);
   box.append(kvs);
 }
@@ -529,29 +604,28 @@ function renderSpo2(d) {
   box.innerHTML = "";
   const n0 = (d.nights || []).find((n) => n.spo2_mean != null);
   if (!n0) {
-    box.append(el("div", "error", "Blood oxygen needs the spo2 feature on overnight."));
+    box.append(el("div", "error", "血氧需要在夜间开启 spo2 功能。"));
     return;
   }
   // SpO2 gauge scale: clamp the reading into [SPO2_MIN, 100] and map to 0–100% fill.
   const SPO2_MIN = 85, SPO2_HEALTHY = 95;
-  box.append(el("div", "big-metric", `<span class="n">${n0.spo2_mean}</span><span class="u">% avg, last night</span>`));
-  box.append(el("div", "sub", "Calibrated from the ring's R-ratio (Oura's own curve)."));
+  box.append(el("div", "big-metric", `<span class="n">${n0.spo2_mean}</span><span class="u">% 昨晚平均</span>`));
+  box.append(el("div", "sub", "由戒指的 R 比值换算(使用 Oura 自己的校准曲线)。"));
   const pct = Math.max(0, Math.min(100, ((n0.spo2_mean - SPO2_MIN) / (100 - SPO2_MIN)) * 100));
   const g = el("div", "gauge");
   const fill = el("i");
   fill.style.width = pct + "%";
   g.append(fill);
   box.append(g);
-  box.append(el("div", "scale", `<span>${SPO2_MIN}</span><span>healthy ≥ ${SPO2_HEALTHY}</span><span>100</span>`));
+  box.append(el("div", "scale", `<span>${SPO2_MIN}</span><span>健康 ≥ ${SPO2_HEALTHY}</span><span>100</span>`));
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fmtDay = (ymd) => {
   const p = (ymd || "").split("-");
-  return p.length === 3 ? `${MONTHS[+p[1] - 1]} ${+p[2]}` : ymd;
+  return p.length === 3 ? `${+p[1]}月${+p[2]}日` : ymd;
 };
 
-const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WD = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 const hhmm = (min) => `${String((min / 60) | 0).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 
 // activity type → vendored glyph (keyword-matched so the ~40 AAD labels resolve to one
@@ -583,26 +657,26 @@ function openActDetail(s) {
   const conf = s.label_confidence != null ? Math.round(s.label_confidence * 100) + "%" : "—";
   const kv = (k, v) => `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   const top3 = (s.top3 || [])
-    .map(([n, p]) => `<div class="t3"><span class="t3n">${cap(n)}</span><span class="t3bar"><i style="width:${Math.round(p * 100)}%"></i></span><span class="t3p">${Math.round(p * 100)}%</span></div>`)
+    .map(([n, p]) => `<div class="t3"><span class="t3n">${cap(zhAct(n))}</span><span class="t3bar"><i style="width:${Math.round(p * 100)}%"></i></span><span class="t3p">${Math.round(p * 100)}%</span></div>`)
     .join("");
   dlg.innerHTML =
     `<form method="dialog">
       <div class="ad-head">
         <span class="ic" style="--i:url(/icons/${actIcon(s.label)}.svg)"></span>
-        <h3>${cap(s.label || "activity")}</h3>
-        ${work ? '<span class="ad-tag">workout</span>' : ""}
+        <h3>${cap(zhAct(s.label))}</h3>
+        ${work ? '<span class="ad-tag">锻炼</span>' : ""}
       </div>
       <div class="ad-grid">
-        ${kv("Time", `${hhmm(s.start)}–${s.end}`)}
-        ${kv("Duration", `${s.duration_min} min`)}
-        ${s.active_kcal != null ? kv("Active calories", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
-        ${kv("Confidence", conf)}
-        ${kv("Workout", work ? "yes" : "no")}
+        ${kv("时间", `${hhmm(s.start)}–${s.end}`)}
+        ${kv("时长", `${s.duration_min} 分钟`)}
+        ${s.active_kcal != null ? kv("活动消耗", `${Math.round(s.active_kcal).toLocaleString()} 千卡`) : ""}
+        ${kv("置信度", conf)}
+        ${kv("锻炼", work ? "是" : "否")}
       </div>
-      <p class="subhead">Model's guesses</p>
-      <div class="t3list">${top3 || '<div class="ad-muted">no alternates</div>'}</div>
-      <p class="ad-foot">Oura automatic_activity_detection — best guess from MET / motion / HR / temp.</p>
-      <div class="dialog-actions"><button class="btn-primary">Close</button></div>
+      <p class="subhead">模型的猜测</p>
+      <div class="t3list">${top3 || '<div class="ad-muted">没有其他候选</div>'}</div>
+      <p class="ad-foot">由 Oura 的 automatic_activity_detection 模型根据 MET、动作、心率和体温做出的最佳猜测。</p>
+      <div class="dialog-actions"><button class="btn-primary">关闭</button></div>
     </form>`;
   dlg.showModal();
 }
@@ -613,10 +687,10 @@ function openActDetail(s) {
 // hover crosshair), clinical metrics, and interpretation. Activity gets its own page.
 
 const STAGE = {
-  1: { name: "Deep", cls: "deep", lvl: 3 },
-  2: { name: "Light", cls: "light", lvl: 2 },
+  1: { name: "深睡", cls: "deep", lvl: 3 },
+  2: { name: "浅睡", cls: "light", lvl: 2 },
   3: { name: "REM", cls: "rem", lvl: 1 },
-  4: { name: "Awake", cls: "wake", lvl: 0 },
+  4: { name: "清醒", cls: "wake", lvl: 0 },
 };
 const parseHM = (s) => { const [h, m] = (s || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
 // the night's clock window unwrapped across midnight (end can exceed 1440)
@@ -662,13 +736,13 @@ document.addEventListener("keydown", (e) => {
 function openDayPage(d, ymd, focus = null, keepScroll = false) {
   const wrap = el("div", "rpt");
   const head = el("div", "rpt-head");
-  const back = el("button", "rpt-back", "‹ Back");
+  const back = el("button", "rpt-back", "‹ 返回");
   back.type = "button";
   back.addEventListener("click", closePage);
   const axis = dayAxis(d, ymd);
-  const exp = el("button", "rpt-back rpt-export", "Export JSON");
+  const exp = el("button", "rpt-back rpt-export", "导出 JSON");
   exp.type = "button";
-  exp.title = "Download this day's sleep, activity and heart-rate data as JSON";
+  exp.title = "把这一天的睡眠、活动和心率数据下载为 JSON";
   exp.addEventListener("click", () => exportDayJson(d, ymd, axis));
   // ‹ › step through the days that have data (dayKeys, newest first) at the same
   // scroll position — so one chart can be compared across days
@@ -679,14 +753,14 @@ function openDayPage(d, ymd, focus = null, keepScroll = false) {
   const step = (k, label, name, key) => {
     const b = el("button", "rpt-day", label);
     b.type = "button";
-    b.title = k ? `${name} day: ${dayTitle(k)} (${key})` : `No ${name === "Previous" ? "earlier" : "later"} day`;
+    b.title = k ? `${name}:${dayTitle(k)}(${key})` : `没有${name === "前一天" ? "更早" : "更晚"}的一天`;
     b.setAttribute("aria-label", b.title);
     if (k) b.addEventListener("click", () => go(k));
     else b.disabled = true;
     return b;
   };
   const when = el("div", "rpt-when");
-  when.append(step(older, "‹", "Previous", "←"), el("div", "rpt-title", dayTitle(ymd)), step(newer, "›", "Next", "→"));
+  when.append(step(older, "‹", "前一天", "←"), el("div", "rpt-title", dayTitle(ymd)), step(newer, "›", "后一天", "→"));
   head.append(back, when, exp);
   const cursor = dayCursor(axis);
   const body = el("div", "rpt-body");
@@ -842,8 +916,8 @@ function exportDayJson(d, ymd, axis) {
 }
 
 const stageLegend = () => el("div", "legend rpt-legend",
-  `<span><i class="sw deep"></i>Deep</span><span><i class="sw light"></i>Light</span>` +
-  `<span><i class="sw rem"></i>REM</span><span><i class="sw wake"></i>Awake</span>`);
+  `<span><i class="sw deep"></i>深睡</span><span><i class="sw light"></i>浅睡</span>` +
+  `<span><i class="sw rem"></i>REM</span><span><i class="sw wake"></i>清醒</span>`);
 
 // stepped clinical hypnogram: y = stage level (Awake top → Deep bottom), colored runs
 function hypnoSvg(stages, w, h, span = [0, 1]) {
@@ -942,27 +1016,27 @@ function stageBar(n) {
 
 // science-based read of the night → a few plain-language sentences + a sleep-debt note
 function sleepInterpretation(d, n, m) {
-  if (n.staging_complete === false) return el("p", "error", "Sleep analysis is incomplete; gaps cannot establish awake time or sleep onset.");
+  if (n.staging_complete === false) return el("p", "error", "睡眠分析不完整:数据有空白,无法据此判断清醒时间或入睡时间。");
   const wrap = el("div", "interp");
   const out = [];
   if (n.efficiency != null)
-    out.push(n.efficiency >= 85 ? `Sleep efficiency of ${n.efficiency}% is solid — little time awake once down.`
-      : n.efficiency >= 75 ? `Efficiency ${n.efficiency}% is fair; some fragmentation kept you from deeper rest.`
-      : `Efficiency ${n.efficiency}% is low — a lot of the night in bed wasn't spent asleep.`);
+    out.push(n.efficiency >= 85 ? `睡眠效率 ${n.efficiency}%,表现不错:入睡后很少醒着。`
+      : n.efficiency >= 75 ? `睡眠效率 ${n.efficiency}%,一般:睡眠有些零碎,影响了深度休息。`
+      : `睡眠效率 ${n.efficiency}%,偏低:躺在床上的很多时间并没有睡着。`);
   if (n.deep_pct != null)
-    out.push(n.deep_pct < 10 ? `Deep sleep was scarce (${n.deep_pct}%) — the physically-restorative stage; low deep often follows late meals, alcohol, or stress.`
-      : `Deep sleep ${n.deep_pct}% (target ~13–23%), the physically-restorative stage.`);
+    out.push(n.deep_pct < 10 ? `深睡很少(${n.deep_pct}%)。深睡是身体修复的阶段,深睡偏少常与晚餐太晚、饮酒或压力有关。`
+      : `深睡 ${n.deep_pct}%(目标约 13–23%),这是身体修复的阶段。`);
   if (n.rem_pct != null && m.rem_latency_min != null)
-    out.push(`REM was ${n.rem_pct}% with first REM ${Math.round(m.rem_latency_min)} min after onset (a short REM latency can signal REM pressure or sleep debt).`);
+    out.push(`REM 占 ${n.rem_pct}%,入睡后 ${Math.round(m.rem_latency_min)} 分钟进入第一次 REM(REM 潜伏期短可能意味着 REM 压力或睡眠债)。`);
   if (m.waso_min != null && m.awakenings != null)
-    out.push(`You spent ${Math.round(m.waso_min)} min awake across ${m.awakenings} awakening${m.awakenings === 1 ? "" : "s"} after first falling asleep.`);
+    out.push(`第一次入睡后,你醒了 ${m.awakenings} 次,共清醒 ${Math.round(m.waso_min)} 分钟。`);
   out.forEach((t) => wrap.append(el("p", "interp-p", t)));
   const sd = d.sleep_debt;
   if (sd && sd.valid && sd.debt_min != null) {
     const h = Math.floor(sd.debt_min / 60), mm = Math.round(sd.debt_min % 60);
     const note = el("div", "interp-debt");
-    note.innerHTML = `<div class="id-v">${h}h ${mm}m</div><div class="id-k">accumulated sleep debt vs an ${sd.need_h} h nightly need` +
-      `${sd.recent_shortfall_min > 0 ? ` · last night ${Math.round(sd.recent_shortfall_min)} min short` : ""}</div>`;
+    note.innerHTML = `<div class="id-v">${h} 小时 ${mm} 分钟</div><div class="id-k">累计睡眠债(每晚需要 ${sd.need_h} 小时)` +
+      `${sd.recent_shortfall_min > 0 ? ` · 昨晚少睡 ${Math.round(sd.recent_shortfall_min)} 分钟` : ""}</div>`;
     wrap.append(note);
   }
   return wrap;
@@ -976,14 +1050,14 @@ function sleepSection(d, ymd, axis, cursor) {
   sec.id = "sec-sleep";
   const n = nightForDay(d, ymd);
   const canEditBedtime = !!(n && n.start_ds != null && n.end_ds != null);
-  const editToggle = canEditBedtime ? el("button", "bedtime-edit-btn", n.bedtime_manual ? "Bedtime · edited" : "Adjust bedtime") : null;
+  const editToggle = canEditBedtime ? el("button", "bedtime-edit-btn", n.bedtime_manual ? "就寝时间 · 已修改" : "调整就寝时间") : null;
   if (editToggle) {
     editToggle.type = "button";
-    editToggle.title = "Adjust bedtime and wake-up window for this night";
+    editToggle.title = "调整这一晚的就寝和起床时间";
   }
-  sec.append(secHead("Sleep", editToggle));
+  sec.append(secHead("睡眠", editToggle));
   if (!n) {
-    sec.append(el("div", "ad-muted", "No sleep ended on this day in the ring's data."));
+    sec.append(el("div", "ad-muted", "戒指数据里没有在这一天结束的睡眠。"));
     return sec;
   }
   const m = n.metrics || {}, s = n.series || {};
@@ -991,23 +1065,23 @@ function sleepSection(d, ymd, axis, cursor) {
   const asleepH = m.asleep_min != null ? m.asleep_min / 60 : null;
   const strip = el("div", "stat-strip");
   strip.innerHTML =
-    statTile("Time in bed", num(n.in_bed_h) + " h") +
-    statTile("Asleep", asleepH != null ? asleepH.toFixed(1) + " h" : "—") +
-    statTile("Efficiency", n.efficiency != null ? n.efficiency + "%" : "—") +
-    statTile(n.bedtime_manual ? "Bedtime · edited" : "Bedtime", `${n.start}–${n.end}`);
+    statTile("在床时间", num(n.in_bed_h) + " 小时") +
+    statTile("睡眠时长", asleepH != null ? asleepH.toFixed(1) + " 小时" : "—") +
+    statTile("睡眠效率", n.efficiency != null ? n.efficiency + "%" : "—") +
+    statTile(n.bedtime_manual ? "就寝时间 · 已修改" : "就寝时间", `${n.start}–${n.end}`);
   sec.append(strip);
   if (canEditBedtime) {
     const editor = el("form", "bedtime-editor");
     editor.hidden = true;
     const rawRange = n.raw_start && n.raw_end ? `${n.raw_start}–${n.raw_end}` : null;
     editor.innerHTML =
-      `<label class="be-field"><span>Bedtime</span><input type="time" name="start" value="${esc(n.start || "23:00")}" required></label>` +
+      `<label class="be-field"><span>就寝</span><input type="time" name="start" value="${esc(n.start || "23:00")}" required></label>` +
       `<span class="be-sep">→</span>` +
-      `<label class="be-field"><span>Wake-up</span><input type="time" name="end" value="${esc(n.end || "07:00")}" required></label>` +
+      `<label class="be-field"><span>起床</span><input type="time" name="end" value="${esc(n.end || "07:00")}" required></label>` +
       `<div class="be-actions">` +
-      `<button type="submit" class="be-save">Apply</button>` +
-      (n.bedtime_manual ? `<button type="button" class="be-reset" title="Restore ring-detected window${rawRange ? ` (${rawRange})` : ""}">Reset</button>` : "") +
-      `<button type="button" class="be-cancel">Cancel</button>` +
+      `<button type="submit" class="be-save">应用</button>` +
+      (n.bedtime_manual ? `<button type="button" class="be-reset" title="恢复戒指检测到的时间${rawRange ? `(${rawRange})` : ""}">重置</button>` : "") +
+      `<button type="button" class="be-cancel">取消</button>` +
       `</div>`;
     const toggleEditor = () => {
       editor.hidden = !editor.hidden;
@@ -1017,7 +1091,7 @@ function sleepSection(d, ymd, axis, cursor) {
     const bedTile = strip.lastElementChild;
     if (bedTile) {
       bedTile.classList.add("ss-interactive");
-      bedTile.title = "Click to adjust bedtime and wake-up";
+      bedTile.title = "点击调整就寝和起床时间";
       bedTile.addEventListener("click", toggleEditor);
     }
     editor.querySelector(".be-cancel")?.addEventListener("click", () => {
@@ -1028,7 +1102,7 @@ function sleepSection(d, ymd, axis, cursor) {
       try {
         const res = await (await postDash("/api/bedtime", payload)).json();
         if (!res.ok) {
-          toast(res.error || "Could not update bedtime.", "error");
+          toast(res.error || "无法更新就寝时间。", "error");
           return;
         }
         toast(okMsg, "ok");
@@ -1039,13 +1113,13 @@ function sleepSection(d, ymd, axis, cursor) {
           openDayPage(fresh, ymd, null, true);
         }
       } catch (_) {
-        toast("Couldn't reach the local server.", "error");
+        toast("连接不上本地服务器。", "error");
       }
     };
     editor.querySelector(".be-reset")?.addEventListener("click", () => {
       submitOverride(
         { raw_start_ds: n.raw_start_ds ?? n.start_ds, captured_unix: n.captured_unix ?? 0, reset: true },
-        "Restored ring-detected sleep window."
+        "已恢复戒指检测到的睡眠时间。"
       );
     });
     editor.addEventListener("submit", (e) => {
@@ -1063,27 +1137,27 @@ function sleepSection(d, ymd, axis, cursor) {
       let newEndDs = Math.round(n.end_ds + dEnd * 600);
       if (newEndDs <= newStartDs) newEndDs += 1440 * 600;
       if (newEndDs - newStartDs < 30 * 600 || newEndDs - newStartDs > 20 * 36000) {
-        toast("Sleep window must be between 30 minutes and 20 hours.", "error");
+        toast("睡眠时间段必须在 30 分钟到 20 小时之间。", "error");
         return;
       }
       submitOverride(
         { raw_start_ds: n.raw_start_ds ?? n.start_ds, captured_unix: n.captured_unix ?? 0, start_ds: newStartDs, end_ds: newEndDs },
-        `Updated sleep window (${startHM}–${endHM}).`
+        `已更新睡眠时间段(${startHM}–${endHM})。`
       );
     });
     sec.append(editor);
   }
   if (staged && n.staging_complete === false)
-    sec.append(el("p", "error", "Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld."));
+    sec.append(el("p", "error", "睡眠分析不完整。空白处表示没有数据,而不是清醒;睡眠指标暂不显示。"));
   if (staged && n.staging_source === "signals") {
     const note = el("p", "hr-note",
-      "Hypnogram from the local signal estimate (heart rate, HRV and motion), not Oura's sleep-staging model. " +
-      "To use Oura's validated model instead, install Python + torch and place the model files under notes/models/ " +
-      "(or set OURA_MODELS_DIR); see dashboard/README.md.");
+      "这张睡眠分期图来自本地的信号估算(心率、HRV 和动作),不是 Oura 的睡眠分期模型。" +
+      "如果想用 Oura 经过验证的模型,请安装 Python + torch,并把模型文件放到 notes/models/ " +
+      "(或设置 OURA_MODELS_DIR);详见 dashboard/README.md。");
     sec.append(note);
   }
   if (staged) sec.append(stageLegend());
-  else sec.append(el("p", "hr-note", "Sleep stages are unavailable for this night. The lanes below are what the ring recorded overnight."));
+  else sec.append(el("p", "hr-note", "这一晚没有睡眠分期。下面的曲线是戒指夜间记录的数据。"));
 
   const W = 1000, a = axis.frac(n.start_unix), b = axis.frac(n.end_unix);
   const rows = [];
@@ -1093,7 +1167,7 @@ function sleepSection(d, ymd, axis, cursor) {
     const st5 = n.stages_5min, t0 = n.stages_t0_unix || n.start_unix;
     const a5 = axis.frac(t0), b5 = axis.frac(t0 + st5.length * 300);
     rows.push({
-      label: "Stages · 5 min (Oura app)", summary: "", height: 96, html: hypnoSvg(st5, W, 92, [a5, b5]),
+      label: "睡眠分期 · 5 分钟(Oura App)", summary: "", height: 96, html: hypnoSvg(st5, W, 92, [a5, b5]),
       valueAt: (t) => {
         const f = axis.frac(t);
         return f < a5 || f >= b5 ? "—" : (STAGE[st5[Math.floor(((f - a5) / Math.max(1e-9, b5 - a5)) * st5.length)]] || {}).name || "";
@@ -1103,7 +1177,7 @@ function sleepSection(d, ymd, axis, cursor) {
   if (staged) {
     const st = n.stages_full;
     rows.push({
-      label: "Stages", summary: "", height: 96, html: hypnoSvg(st, W, 92, [a, b]),
+      label: "睡眠分期", summary: "", height: 96, html: hypnoSvg(st, W, 92, [a, b]),
       valueAt: (t) => {
         const f = axis.frac(t);
         return f < a || f > b ? "—" : (STAGE[st[Math.round(((f - a) / Math.max(1e-9, b - a)) * (st.length - 1))]] || {}).name || "";
@@ -1147,26 +1221,26 @@ function sleepSection(d, ymd, axis, cursor) {
       },
     });
   };
-  addLane("hr", "Heart rate", "bpm", "var(--warn)");
+  addLane("hr", "心率", "bpm", "var(--warn)");
   addLane("hrv", "HRV", "ms", "var(--accent)");
-  addLane("spo2", "Blood O₂", "%", "var(--rem)");
-  addLane("temp", "Skin temp", "°C", "var(--light)", 1, s.temp_span || [0, 1]);
-  addLane("motion", "Motion", "s", "var(--faint)");
-  if (rows.length) sec.append(el("p", "subhead", "Overnight"), tlBox(axis, cursor, rows));
+  addLane("spo2", "血氧", "%", "var(--rem)");
+  addLane("temp", "皮肤温度", "°C", "var(--light)", 1, s.temp_span || [0, 1]);
+  addLane("motion", "动作", "秒", "var(--faint)");
+  if (rows.length) sec.append(el("p", "subhead", "夜间"), tlBox(axis, cursor, rows));
   if (!staged) return sec;
 
   // architecture + clinical metrics
-  sec.append(el("p", "subhead", "Sleep architecture"), stageBar(n));
+  sec.append(el("p", "subhead", "睡眠结构"), stageBar(n));
   const mg = el("div", "metric-grid");
-  const mins = (x) => (x != null ? Math.round(x) + " min" : "—");
+  const mins = (x) => (x != null ? Math.round(x) + " 分钟" : "—");
   const mc = (k, v) => `<div class="mc"><div class="mc-v">${v}</div><div class="mc-k">${k}</div></div>`;
   mg.innerHTML =
-    mc("Sleep onset", mins(m.sol_min)) +
-    mc("REM latency", mins(m.rem_latency_min)) +
-    mc("Awake (WASO)", mins(m.waso_min)) +
-    mc("Awakenings", m.awakenings != null ? m.awakenings : "—") +
-    mc("Sleep cycles", m.cycles != null ? m.cycles : "—") +
-    mc("Fragmentation", m.frag_index != null ? m.frag_index + " /h" : "—");
+    mc("入睡用时", mins(m.sol_min)) +
+    mc("REM 潜伏期", mins(m.rem_latency_min)) +
+    mc("入睡后清醒(WASO)", mins(m.waso_min)) +
+    mc("醒来次数", m.awakenings != null ? m.awakenings : "—") +
+    mc("睡眠周期", m.cycles != null ? m.cycles : "—") +
+    mc("碎片化指数", m.frag_index != null ? m.frag_index + " 次/小时" : "—");
   sec.append(mg);
 
   // autonomic recovery resolved by sleep stage. Deep-sleep HRV is the recovery-relevant
@@ -1174,19 +1248,19 @@ function sleepSection(d, ymd, axis, cursor) {
   // stage-driven (deep ↑, REM ↓), so a slope mostly tracks stage order, not recovery.
   const au = n.autonomic;
   if (au && [au.hrv_deep, au.hrv_light, au.hrv_rem, au.hr_deep, au.hr_light, au.hr_rem].some((x) => x != null)) {
-    sec.append(el("p", "subhead", "Autonomic recovery by stage"));
+    sec.append(el("p", "subhead", "各睡眠阶段的自主神经恢复"));
     const at = el("div", "metric-grid");
     const val = (x, u) => (x != null ? x + u : "—");
     at.innerHTML =
-      mc("HRV · Deep", val(au.hrv_deep, " ms")) +
-      mc("HRV · Light", val(au.hrv_light, " ms")) +
+      mc("HRV · 深睡", val(au.hrv_deep, " ms")) +
+      mc("HRV · 浅睡", val(au.hrv_light, " ms")) +
       mc("HRV · REM", val(au.hrv_rem, " ms")) +
-      mc("HR · Deep", val(au.hr_deep, " bpm")) +
-      mc("HR · Light", val(au.hr_light, " bpm")) +
-      mc("HR · REM", val(au.hr_rem, " bpm"));
+      mc("心率 · 深睡", val(au.hr_deep, " bpm")) +
+      mc("心率 · 浅睡", val(au.hr_light, " bpm")) +
+      mc("心率 · REM", val(au.hr_rem, " bpm"));
     sec.append(at);
   }
-  sec.append(el("p", "subhead", "Interpretation"), sleepInterpretation(d, n, m));
+  sec.append(el("p", "subhead", "解读"), sleepInterpretation(d, n, m));
   return sec;
 }
 
@@ -1206,15 +1280,15 @@ function movementSvg(prof, axis, w, h) {
 function activitySection(d, ymd, axis, cursor) {
   const sec = el("section", "rpt-sec");
   sec.id = "sec-activity";
-  sec.append(secHead("Activity"));
+  sec.append(secHead("活动"));
   const ds = (d.activity_daily || {})[ymd];
   const prof = (d.activity_profile || {})[ymd] || [];
   const strip = el("div", "stat-strip");
   strip.innerHTML =
-    statTile("Steps", ds ? Math.round(ds.steps || 0).toLocaleString() : "—") +
-    statTile("Active energy", ds ? Math.round(ds.active_kcal || 0) + " kcal" : "—") +
-    statTile("Total energy", ds ? Math.round(ds.total_kcal || 0) + " kcal" : "—") +
-    (ds && ds.distance_m != null ? statTile("Distance", (ds.distance_m / 1000).toFixed(1) + " km") : "");
+    statTile("步数", ds ? Math.round(ds.steps || 0).toLocaleString() : "—") +
+    statTile("活动消耗", ds ? Math.round(ds.active_kcal || 0) + " 千卡" : "—") +
+    statTile("总消耗", ds ? Math.round(ds.total_kcal || 0) + " 千卡" : "—") +
+    (ds && ds.distance_m != null ? statTile("距离", (ds.distance_m / 1000).toFixed(1) + " km") : "");
   sec.append(strip);
 
   const svg = movementSvg(prof, axis, 1000, 90);
@@ -1224,8 +1298,8 @@ function activitySection(d, ymd, axis, cursor) {
       const i = Math.floor((t - axis.dayStart) / bucketS);
       return i >= 0 && i < p.length ? `${p[i].toFixed(1)} MET` : "—";
     };
-    sec.append(el("p", "subhead", "Movement"),
-      tlBox(axis, cursor, [{ label: "Movement", summary: `peak ${Math.max(...p).toFixed(1)}`, height: 90, html: svg, valueAt: at }]));
+    sec.append(el("p", "subhead", "活动量"),
+      tlBox(axis, cursor, [{ label: "活动量", summary: `峰值 ${Math.max(...p).toFixed(1)}`, height: 90, html: svg, valueAt: at }]));
   }
 
   // intensity-derived metrics (buckets are 15-min MET-above-rest)
@@ -1237,13 +1311,13 @@ function activitySection(d, ymd, axis, cursor) {
   const mg = el("div", "metric-grid");
   const mc = (k, v) => `<div class="mc"><div class="mc-v">${v}</div><div class="mc-k">${k}</div></div>`;
   mg.innerHTML =
-    mc("Active", Math.round(activeMin) + " min") +
-    mc("Lightly active", Math.round(lightMin) + " min") +
-    mc("Peak intensity", peakMet.toFixed(1) + " MET") +
-    mc("Sessions", sessions.length);
+    mc("活跃", Math.round(activeMin) + " 分钟") +
+    mc("轻度活跃", Math.round(lightMin) + " 分钟") +
+    mc("峰值强度", peakMet.toFixed(1) + " MET") +
+    mc("活动次数", sessions.length);
   sec.append(mg);
 
-  sec.append(el("p", "subhead", "Sessions"));
+  sec.append(el("p", "subhead", "活动记录"));
   if (sessions.length) {
     const list = el("div", "dd-sessions");
     sessions.forEach((sess) => {
@@ -1251,15 +1325,15 @@ function activitySection(d, ymd, axis, cursor) {
       row.type = "button";
       const ico = el("span", "ic");
       ico.style.setProperty("--i", `url(/icons/${actIcon(sess.label)}.svg)`);
-      const nm = el("span", "dd-s-name"); nm.textContent = sess.label || "activity";
-      const meta = el("span", "dd-s-meta"); meta.textContent = `${sess.duration_min} min · ${hhmm(sess.start)}`;
+      const nm = el("span", "dd-s-name"); nm.textContent = zhAct(sess.label);
+      const meta = el("span", "dd-s-meta"); meta.textContent = `${sess.duration_min} 分钟 · ${hhmm(sess.start)}`;
       row.append(ico, nm, meta);
       row.addEventListener("click", () => openActDetail(sess));
       list.append(row);
     });
     sec.append(list);
   } else {
-    sec.append(el("div", "ad-muted", "No sessions detected this day."));
+    sec.append(el("div", "ad-muted", "这一天没有检测到活动。"));
   }
   return sec;
 }
@@ -1335,14 +1409,14 @@ function heartSection(ymd, axis, cursor) {
   const sec = el("section", "rpt-sec");
   sec.id = "sec-heart";
   const sw = el("div", "hr-bin");
-  sec.append(secHead("Heart rate", sw));
+  sec.append(secHead("心率", sw));
   const strip = el("div", "stat-strip");
   const chart = el("div");
   const readout = el("p", "hr-readout", "&nbsp;");
   sec.append(strip, chart, readout,
-    el("p", "hr-note", "Each bar spans that slot's typical range (5th–95th percentile of its values); the tick is the median. " +
-      "Lighter bars are built from only a few values: while you sleep the ring stores 5-minute averages rather than beats. " +
-      "Empty slots had no readings."));
+    el("p", "hr-note", "每根柱子表示该时段的典型范围(数值的第 5 到第 95 百分位),横线是中位数。" +
+      "颜色较浅的柱子只由少量数值得出:睡觉时戒指存的是 5 分钟平均值,而不是每次心跳。" +
+      "空白时段没有读数。"));
   const load = () => {
     const seq = ++HR_SEQ; // a slower earlier response must not overwrite a newer one
     sw.querySelectorAll("button").forEach((b) => b.classList.toggle("on", +b.dataset.min === HR_BIN_MIN));
@@ -1357,11 +1431,11 @@ function heartSection(ymd, axis, cursor) {
       })
       .catch((e) => {
         if (seq !== HR_SEQ) return;
-        chart.replaceChildren(el("p", "hr-empty", "Couldn't load heart rate: " + esc(e.message)));
+        chart.replaceChildren(el("p", "hr-empty", "心率加载失败:" + esc(e.message)));
         readout.innerHTML = "&nbsp;";
       });
   };
-  for (const [min, label] of [[15, "15 min"], [60, "1 h"]]) {
+  for (const [min, label] of [[15, "15 分钟"], [60, "1 小时"]]) {
     const b = el("button", "", label);
     b.type = "button";
     b.dataset.min = min;
@@ -1378,7 +1452,7 @@ function renderHeart(j, ymd, axis, cursor, strip, chart, readout) {
   const day = bins.filter((b) => b.ymd === ymd); // the stats cover the day itself
   if (!bins.length) {
     strip.innerHTML = "";
-    chart.replaceChildren(el("p", "hr-empty", "No heart-rate readings for this day yet. Wear the ring and sync."));
+    chart.replaceChildren(el("p", "hr-empty", "这一天还没有心率读数。戴上戒指并同步。"));
     readout.innerHTML = "&nbsp;";
     cursor.onMove("heart", () => {});
     return;
@@ -1389,10 +1463,10 @@ function renderHeart(j, ymd, axis, cursor, strip, chart, readout) {
   const calm = statRows.reduce((a, b) => (b.median < a.median ? b : a));
   const latest = hrLatestOn(j, ymd);
   strip.innerHTML =
-    (latest != null ? statTile("Latest", `${r0(latest)} bpm`) : "") +
-    statTile("Range", `${r0(low)}–${r0(high)} bpm`) +
-    statTile(`Lowest · ${axis.clock(calm.unix)}`, `${r0(calm.median)} bpm`) +
-    statTile("Hours measured", `${new Set(statRows.map((r) => `${r.ymd} ${r.hour}`)).size} of 24`);
+    (latest != null ? statTile("最新", `${r0(latest)} bpm`) : "") +
+    statTile("范围", `${r0(low)}–${r0(high)} bpm`) +
+    statTile(`最低 · ${axis.clock(calm.unix)}`, `${r0(calm.median)} bpm`) +
+    statTile("有数据的小时", `${new Set(statRows.map((r) => `${r.ymd} ${r.hour}`)).size} / 24`);
 
   const allLow = Math.min(...bins.map((r) => r.low)), allHigh = Math.max(...bins.map((r) => r.high));
   const lo = Math.max(0, Math.floor(allLow / 10) * 10 - 10), hi = Math.ceil(allHigh / 10) * 10 + 10;
@@ -1402,23 +1476,22 @@ function renderHeart(j, ymd, axis, cursor, strip, chart, readout) {
   const sorted = statRows.map((r) => r.median).sort((a, b) => a - b);
   const at = (t) => bins.find((b) => t >= b.unix && t < b.unix + span);
   chart.replaceChildren(tlBox(axis, cursor, [{
-    label: "Heart rate", summary: `${r0(sorted[Math.floor(sorted.length / 2)])} bpm`, height: H,
+    label: "心率", summary: `${r0(sorted[Math.floor(sorted.length / 2)])} bpm`, height: H,
     html: hrTimelineSvg(bins, axis, span / 60, lo, hi, 1000, H), rticks: rticks.join(""),
     valueAt: (t) => { const b = at(t); return b ? `${r0(b.median)} bpm` : "—"; },
   }]));
 
   // the detailed slot line under the chart follows the page cursor from any chart
-  const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
-  const madeOf = (b) => [b.beats ? plural(b.beats, "beat") : "", b.averages ? plural(b.averages, "five-minute average") : ""]
+  const madeOf = (b) => [b.beats ? `${b.beats.toLocaleString()} 次心跳` : "", b.averages ? `${b.averages.toLocaleString()} 个 5 分钟平均值` : ""]
     .filter(Boolean).join(" + ");
-  const idle = "Move over any chart to see that moment across sleep, activity and heart rate.";
+  const idle = "把鼠标移到任意图表上,可以同时查看那一刻的睡眠、活动和心率。";
   readout.textContent = idle;
   cursor.onMove("heart", (t) => {
     if (t == null) { readout.textContent = idle; return; }
     const b = at(t), s0 = b ? b.unix : Math.floor(t / span) * span;
-    readout.textContent = `${axis.clock(s0)}–${axis.clock(s0 + span)} · ` + (!b ? "no readings" : b.beats
-      ? `median ${r0(b.median)} bpm · typical ${r0(b.low)}–${r0(b.high)} · min ${r0(b.min)} · max ${r0(b.max)} · ${madeOf(b)}`
-      : `median ${r0(b.median)} bpm · range ${r0(b.min)}–${r0(b.max)} · ${madeOf(b)}`);
+    readout.textContent = `${axis.clock(s0)}–${axis.clock(s0 + span)} · ` + (!b ? "无读数" : b.beats
+      ? `中位数 ${r0(b.median)} bpm · 典型 ${r0(b.low)}–${r0(b.high)} · 最低 ${r0(b.min)} · 最高 ${r0(b.max)} · ${madeOf(b)}`
+      : `中位数 ${r0(b.median)} bpm · 范围 ${r0(b.min)}–${r0(b.max)} · ${madeOf(b)}`);
   });
 }
 
@@ -1436,10 +1509,10 @@ function openDaysBrowser(d, days) {
   form.method = "dialog";
   const head = el("div", "dd-head");
   const h = el("h3");
-  h.textContent = `All ${days.length} days`;
+  h.textContent = `全部 ${days.length} 天`;
   const close = el("button", "dd-close", "✕");
   close.type = "button";
-  close.setAttribute("aria-label", "Close");
+  close.setAttribute("aria-label", "关闭");
   close.addEventListener("click", () => dlg.close());
   head.append(h, close);
   form.append(head);
@@ -1452,7 +1525,7 @@ function openDaysBrowser(d, days) {
     row.type = "button";
     const left = el("div", "dl-left");
     left.append(el("div", "dl-date", dayTitle(ymd)));
-    left.append(el("div", "dl-sub", ds ? `${kfmt(ds.steps)} steps · ${Math.round(ds.active_kcal)} kcal` : (n ? "sleep only" : "—")));
+    left.append(el("div", "dl-sub", ds ? `${kfmt(ds.steps)} 步 · ${Math.round(ds.active_kcal)} 千卡` : (n ? "仅睡眠" : "—")));
     row.append(left);
     if (n && n.stages && n.stages.length) {
       const hyp = hypnogram(n.stages);
@@ -1483,14 +1556,14 @@ async function doFeature(feature, name, currentOn, row) {
   try {
     const j = await (await postDash("/api/feature", { feature, mode: turnOn ? "automatic" : "off" })).json();
     if (j.ok) {
-      toast(`${name} turned ${turnOn ? "on" : "off"}. Wear the ring; data appears on the next sync.`, "ok");
+      toast(`已${turnOn ? "开启" : "关闭"}${zh(name)}。请戴上戒指,数据会在下次同步时出现。`, "ok");
       load(); // refresh dev.measuring so a second tap toggles from the real state
     } else {
       toast(syncHint(j.message), "error");
       row.classList.toggle("on", currentOn); // revert
     }
   } catch (e) {
-    toast("Couldn't reach the local server.", "error");
+    toast("连接不上本地服务器。", "error");
     row.classList.toggle("on", currentOn);
   }
   row.classList.remove("busy");
@@ -1504,7 +1577,7 @@ function batteryChart(pts) {
   if (pts.length < 2) return null;
   const wrap = el("div", "batt-chart");
   const head = el("div", "batt-head");
-  head.append(el("p", "subhead", "Battery"));
+  head.append(el("p", "subhead", "电量"));
   const readout = el("span", "batt-readout");
   head.append(readout);
   wrap.append(head);
@@ -1535,7 +1608,7 @@ function batteryChart(pts) {
 
   const days = Math.max(1, Math.round((t1 - t0) / 86400));
   const foot = el("div", "batt-foot");
-  foot.append(el("span", "", `${dayTitle(ymdOf(t0, d0TZ()))} → ${hhmmOf(t1)}`), el("span", "", `${days} day${days === 1 ? "" : "s"}`));
+  foot.append(el("span", "", `${dayTitle(ymdOf(t0, d0TZ()))} → ${hhmmOf(t1)}`), el("span", "", `${days} 天`));
   wrap.append(foot);
 
   const cursor = plot.querySelector(".batt-cursor");
@@ -1565,12 +1638,12 @@ const hhmmOf = (unix) => {
 // Shared by the device card and the toolbar battery pill so the two cannot drift.
 function batteryRecordedLabel(dev) {
   if (!dev.battery_recorded) return "";
-  let rec = `Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
+  let rec = `记录于 ${zh(dev.battery_recorded)}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
   const h = dev.battery_fresh_hours;
   if (h != null) {
-    if (h >= 24) rec += ` (${Math.round(h / 24)}d ago)`;
-    else if (h >= 1) rec += ` (${Math.round(h)}h ago)`;
-    else rec += ` (<1h ago)`;
+    if (h >= 24) rec += `(${Math.round(h / 24)} 天前)`;
+    else if (h >= 1) rec += `(${Math.round(h)} 小时前)`;
+    else rec += `(不到 1 小时前)`;
   }
   return rec;
 }
@@ -1583,16 +1656,16 @@ function renderDevice(d) {
   const stats = el("div", "dh-stats");
   const stat = (k, v, u) => el("div", "dh-stat", `<div class="k">${k}</div><div class="v">${v}<span class="u">${u || ""}</span></div>`);
   const bpct = dev.battery_pct;
-  const bstat = stat("Battery", bpct != null ? bpct : "—", "%");
+  const bstat = stat("电量", bpct != null ? bpct : "—", "%");
   if (bpct != null && bpct < 20) bstat.classList.add("low");
   if (dev.battery_recorded) {
-    bstat.title = `Battery: ${bpct != null ? bpct + "%" : "—"}${dev.battery_v ? " (" + dev.battery_v + " V)" : ""}\n${batteryRecordedLabel(dev)}`;
+    bstat.title = `电量:${bpct != null ? bpct + "%" : "—"}${dev.battery_v ? " (" + dev.battery_v + " V)" : ""}\n${batteryRecordedLabel(dev)}`;
   }
   stats.append(bstat);
   const fresh = dev.fresh_hours != null ? (dev.fresh_hours < 1 ? "<1" : Math.round(dev.fresh_hours)) : "—";
-  stats.append(stat("Last sync", fresh, " h ago"));
-  stats.append(stat("History", num(dev.days_of_data), " days"));
-  stats.append(stat("Events", (dev.raw_events ?? dev.total_events ?? 0).toLocaleString()));
+  stats.append(stat("上次同步", fresh, " 小时前"));
+  stats.append(stat("历史", num(dev.days_of_data), " 天"));
+  stats.append(stat("事件", (dev.raw_events ?? dev.total_events ?? 0).toLocaleString()));
   box.append(stats);
   const battery = batteryChart(dev.battery_history || []);
   if (battery) box.append(battery);
@@ -1601,13 +1674,13 @@ function renderDevice(d) {
   const left = el("div");
   const streams = dev.streams || [];
   if (streams.length) {
-    left.append(el("p", "subhead", "Data captured"));
+    left.append(el("p", "subhead", "已采集的数据"));
     const max = Math.max(...streams.map((s) => s.count), 1);
     const sc = el("div", "streams");
     streams.forEach((s) => {
       const row = el("div", "stream");
       const nm = el("span", "s-name");
-      nm.textContent = s.name;
+      nm.textContent = zh(s.name);
       const bar = el("span", "s-bar");
       const fill = el("i");
       fill.style.width = Math.max(3, (s.count / max) * 100) + "%";
@@ -1623,13 +1696,13 @@ function renderDevice(d) {
 
   // right = insights
   const right = el("div");
-  right.append(el("p", "subhead", "Insights available"));
+  right.append(el("p", "subhead", "可用的分析"));
   const ins = el("div", "insights");
   (dev.insights || []).forEach((i) => {
     const row = el("div", "insight");
-    row.append(el("div", null, `${i.name}${i.status === "gated" && i.why ? `<span class="why"> · ${i.why}</span>` : ""}`));
+    row.append(el("div", null, `${zh(i.name)}${i.status === "gated" && i.why ? `<span class="why"> · ${zh(i.why)}</span>` : ""}`));
     const st = el("span", "status " + i.status);
-    st.innerHTML = `<i></i>${i.status}`;
+    st.innerHTML = `<i></i>${zh(i.status)}`;
     row.append(st);
     ins.append(row);
   });
@@ -1639,60 +1712,60 @@ function renderDevice(d) {
   // ── advanced / debugging (collapsed by default) ──────────────────────────
   const adv = el("details", "dh-advanced");
   const sum = el("summary");
-  sum.innerHTML = `<span class="ic" style="--i:url(/icons/cpu.svg)"></span>Advanced &amp; debugging<span class="chev"></span>`;
+  sum.innerHTML = `<span class="ic" style="--i:url(/icons/cpu.svg)"></span>高级与调试<span class="chev"></span>`;
   adv.append(sum);
   const ab = el("div", "adv-body");
 
   // device identity + sync internals
-  ab.append(el("p", "subhead", "Device"));
+  ab.append(el("p", "subhead", "设备"));
   const kv = el("div", "adv-kv");
   const kvItem = (k, v) => `<div><i>${k}</i><b>${v}</b></div>`;
   const rawTotal = dev.raw_events ?? dev.total_events ?? 0;
   const decodedTotal = dev.decoded_events ?? dev.total_events ?? 0;
-  const historyDetail = `${num(dev.days_of_data)} days elapsed` +
-    (dev.observed_days != null ? ` · ${dev.observed_days} days observed` : "") +
-    (dev.observed_coverage_days != null ? ` (${num(dev.observed_coverage_days)} d active)` : "");
+  const historyDetail = `跨度 ${num(dev.days_of_data)} 天` +
+    (dev.observed_days != null ? ` · 有数据 ${dev.observed_days} 天` : "") +
+    (dev.observed_coverage_days != null ? `(活跃 ${num(dev.observed_coverage_days)} 天)` : "");
   kv.innerHTML =
-    kvItem("Ring ID", esc(dev.serial || "—")) +
-    kvItem("Firmware", esc(dev.firmware || "—")) +
+    kvItem("戒指 ID", esc(dev.serial || "—")) +
+    kvItem("固件", esc(dev.firmware || "—")) +
     kvItem("API", esc(dev.api_version || "—")) +
     kvItem("MAC", esc(dev.mac || "—")) +
-    kvItem("Hardware", esc(dev.hardware_id || "—")) +
-    kvItem("Battery", dev.battery_v != null ? `${dev.battery_pct != null ? dev.battery_pct + "%" : "—"} · ${dev.battery_v} V` + (dev.battery_recorded ? `<br><span style="color:var(--faint);font-size:11px">Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}</span>` : "") : (dev.battery_pct != null ? `${dev.battery_pct}%` : "—")) +
-    kvItem("Last sync", `${esc(dev.synced || "—")} ${esc(dev.synced_hm || "")}`) +
-    kvItem("Sync cursor", dev.next_cursor != null ? dev.next_cursor.toLocaleString() : "—") +
-    kvItem("History", historyDetail) +
-    kvItem("Events", `${rawTotal.toLocaleString()} raw · ${decodedTotal.toLocaleString()} decoded`);
+    kvItem("硬件", esc(dev.hardware_id || "—")) +
+    kvItem("电量", dev.battery_v != null ? `${dev.battery_pct != null ? dev.battery_pct + "%" : "—"} · ${dev.battery_v} V` + (dev.battery_recorded ? `<br><span style="color:var(--faint);font-size:11px">记录于 ${zh(dev.battery_recorded)}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}</span>` : "") : (dev.battery_pct != null ? `${dev.battery_pct}%` : "—")) +
+    kvItem("上次同步", `${esc(zh(dev.synced) || "—")} ${esc(dev.synced_hm || "")}`) +
+    kvItem("同步游标", dev.next_cursor != null ? dev.next_cursor.toLocaleString() : "—") +
+    kvItem("历史", historyDetail) +
+    kvItem("事件", `原始 ${rawTotal.toLocaleString()} · 已解码 ${decodedTotal.toLocaleString()}`);
   ab.append(kv);
 
   // local auth key portability
-  ab.append(el("p", "subhead", "Ring auth key"));
+  ab.append(el("p", "subhead", "戒指认证密钥"));
   const keyTools = el("div", "key-tools");
-  const exportBtn = el("button", "btn-text key-btn", "Export / QR");
+  const exportBtn = el("button", "btn-text key-btn", "导出 / 二维码");
   exportBtn.type = "button";
-  exportBtn.title = "Show copy, download, and QR options for the local ring auth key.";
+  exportBtn.title = "显示本地戒指认证密钥的复制、下载和二维码选项。";
   exportBtn.addEventListener("click", exportRingKey);
-  const importBtn = el("button", "btn-text key-btn", "Import / scan");
+  const importBtn = el("button", "btn-text key-btn", "导入 / 扫描");
   importBtn.type = "button";
-  importBtn.title = "Paste, upload, or scan a ring auth key.";
+  importBtn.title = "粘贴、上传或扫描戒指认证密钥。";
   importBtn.addEventListener("click", openImportKeyDialog);
   keyTools.append(exportBtn, importBtn);
   ab.append(keyTools);
 
   // capability toggles
-  ab.append(el("p", "subhead", "Capabilities · tap to toggle"));
+  ab.append(el("p", "subhead", "功能 · 点按切换"));
   const caps = el("div", "caps");
   (dev.measuring || []).forEach((m) => {
     const row = el("div", "cap" + (m.on ? " on" : ""));
     const ic = el("span", "ic");
     ic.style.setProperty("--i", `url(/icons/${capIcon(m.name)}.svg)`);
     const nm = el("span", "cap-name");
-    nm.textContent = m.name;
+    nm.textContent = zh(m.name);
     const sw = el("span", "switch", "<i></i>");
     row.append(ic, nm, sw);
     if (m.feature) {
       row.classList.add("interactive");
-      row.title = `Tap to turn ${m.on ? "off" : "on"} (connects to the ring)`;
+      row.title = `点按${m.on ? "关闭" : "开启"}(会连接戒指)`;
       row.addEventListener("click", () => doFeature(m.feature, m.name, m.on, row));
     }
     caps.append(row);
@@ -1701,7 +1774,7 @@ function renderDevice(d) {
 
   const ev = dev.event_counts || [];
   if (ev.length) {
-    ab.append(el("p", "subhead", `Event stream · ${ev.length} types`));
+    ab.append(el("p", "subhead", `事件流 · ${ev.length} 种`));
     const emax = Math.max(...ev.map((e) => e.count), 1);
     const tbl = el("div", "ev-table");
     ev.forEach((e) => {
@@ -1733,30 +1806,30 @@ async function exportRingKey() {
     const j = await fetchRingKey();
     if (!j) return;
     if (!j.ok) {
-      toast(j.message || "No key file is configured. Start the dashboard with --key-file.", "error");
+      toast(zh(j.message) || "没有配置密钥文件。请用 --key-file 启动仪表盘。", "error");
       return;
     }
     openExportKeyDialog(j.key);
   } catch {
-    toast("Couldn't export the ring auth key.", "error");
+    toast("无法导出戒指认证密钥。", "error");
   }
 }
 
 async function fetchRingKey() {
   const r = await getDash("/api/ring-key");
   if (!r.ok) {
-    toast("Restart the dashboard server to enable key export.", "error");
+    toast("重启仪表盘服务器后才能导出密钥。", "error");
     return null;
   }
   return await r.json();
 }
 
-async function copyText(text, ok = "Copied.") {
+async function copyText(text, ok = "已复制。") {
   try {
     await navigator.clipboard.writeText(text);
     toast(ok, "ok");
   } catch {
-    toast("Couldn't write to the clipboard.", "error");
+    toast("无法写入剪贴板。", "error");
   }
 }
 
@@ -1769,7 +1842,7 @@ function downloadRingKey(key) {
   a.click();
   a.remove();
   URL.revokeObjectURL(a.href);
-  toast("Ring auth key downloaded.", "ok");
+  toast("已下载戒指认证密钥。", "ok");
 }
 
 function openExportKeyDialog(key) {
@@ -1782,17 +1855,17 @@ function openExportKeyDialog(key) {
   }
   dlg.innerHTML = `
     <form method="dialog">
-      <h3>Ring auth key</h3>
-      <p class="dialog-sub">Use this on another computer running open_oura with the same ring.</p>
-      <div class="qr-wrap"><canvas id="key-qr" width="232" height="232" aria-label="Ring auth key QR code"></canvas></div>
+      <h3>戒指认证密钥</h3>
+      <p class="dialog-sub">在另一台运行 open_oura、连接同一枚戒指的电脑上使用。</p>
+      <div class="qr-wrap"><canvas id="key-qr" width="232" height="232" aria-label="戒指认证密钥二维码"></canvas></div>
       <input id="key-export-value" class="key-field" readonly value="${esc(key)}" />
       <div class="dialog-actions key-actions">
-        <button type="button" id="key-copy" class="btn-primary">Copy</button>
-        <button type="button" id="key-download" class="btn-text">Download</button>
-        <button class="btn-text">Close</button>
+        <button type="button" id="key-copy" class="btn-primary">复制</button>
+        <button type="button" id="key-download" class="btn-text">下载</button>
+        <button class="btn-text">关闭</button>
       </div>
     </form>`;
-  dlg.querySelector("#key-copy").addEventListener("click", () => copyText(key, "Ring auth key copied."));
+  dlg.querySelector("#key-copy").addEventListener("click", () => copyText(key, "已复制戒指认证密钥。"));
   dlg.querySelector("#key-download").addEventListener("click", () => downloadRingKey(key));
   dlg.showModal();
   drawQr($("key-qr"), key.toUpperCase());
@@ -1809,15 +1882,15 @@ function openImportKeyDialog() {
   const canScan = "BarcodeDetector" in window && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
   dlg.innerHTML = `
     <form method="dialog">
-      <h3>Import ring key</h3>
-      <p class="dialog-sub">Paste a 32-character hex key, upload a .key file, or scan the export QR code.</p>
-      <textarea id="key-import-value" class="key-field key-textarea" spellcheck="false" autocomplete="off" placeholder="32 hex characters"></textarea>
+      <h3>导入戒指密钥</h3>
+      <p class="dialog-sub">粘贴 32 位十六进制密钥、上传 .key 文件,或扫描导出的二维码。</p>
+      <textarea id="key-import-value" class="key-field key-textarea" spellcheck="false" autocomplete="off" placeholder="32 位十六进制字符"></textarea>
       <video id="key-scan-video" class="key-video" playsinline muted hidden></video>
       <div class="dialog-actions key-actions">
-        <button type="button" id="key-import-save" class="btn-primary">Import</button>
-        <button type="button" id="key-import-file" class="btn-text">File</button>
-        <button type="button" id="key-import-scan" class="btn-text"${canScan ? "" : " disabled"}>Scan</button>
-        <button type="button" id="key-import-close" class="btn-text">Close</button>
+        <button type="button" id="key-import-save" class="btn-primary">导入</button>
+        <button type="button" id="key-import-file" class="btn-text">文件</button>
+        <button type="button" id="key-import-scan" class="btn-text"${canScan ? "" : " disabled"}>扫描</button>
+        <button type="button" id="key-import-close" class="btn-text">关闭</button>
       </div>
       <input id="key-import-file-input" class="key-input" type="file" accept=".key,text/plain" />
     </form>`;
@@ -1854,14 +1927,14 @@ async function startKeyScan() {
       if (raw) {
         $("key-import-value").value = raw.trim();
         stopKeyScan();
-        toast("QR code scanned.", "ok");
+        toast("已扫描二维码。", "ok");
         return;
       }
       requestAnimationFrame(scan);
     };
     scan();
   } catch {
-    toast("Camera QR scan is not available in this browser.", "error");
+    toast("这个浏览器不支持用摄像头扫描二维码。", "error");
     stopKeyScan();
   }
 }
@@ -1885,25 +1958,25 @@ async function importRingKeyFile(input) {
   try {
     await importRingKeyText(await file.text());
   } catch {
-    toast("Couldn't read that key file.", "error");
+    toast("无法读取这个密钥文件。", "error");
   }
 }
 
 async function importRingKeyText(text) {
   const key = (text || "").trim();
   if (!/^[0-9a-fA-F]{32}$/.test(key)) {
-    toast("Auth key must be exactly 32 hex characters.", "error");
+    toast("认证密钥必须正好是 32 位十六进制字符。", "error");
     return;
   }
   try {
     const j = await (await postDash("/api/ring-key", { key })).json();
     if (j.ok) {
       closeImportKeyDialog();
-      toast("Ring auth key imported.", "ok");
+      toast("已导入戒指认证密钥。", "ok");
     }
-    else toast(j.message || "Couldn't import the ring auth key.", "error");
+    else toast(zh(j.message) || "无法导入戒指认证密钥。", "error");
   } catch {
-    toast("Couldn't reach the local dashboard server.", "error");
+    toast("连接不上本地仪表盘服务器。", "error");
   }
 }
 
@@ -2010,7 +2083,7 @@ function renderActions(d) {
     b.innerHTML = icon("battery-high") + `<span>${dev.battery_pct}%</span>`;
     b.classList.toggle("low", dev.battery_pct < 20);
     b.hidden = false;
-    let title = `Ring battery ${dev.battery_pct}%`;
+    let title = `戒指电量 ${dev.battery_pct}%`;
     if (dev.battery_v) title += ` · ${dev.battery_v} V`;
     const rec = batteryRecordedLabel(dev);
     if (rec) title += `\n${rec}`;
@@ -2018,7 +2091,7 @@ function renderActions(d) {
   } else {
     b.hidden = true;
   }
-  $("foot-meta").textContent = `${dev.nights || 0} nights · ${(dev.total_events || 0).toLocaleString()} events`;
+  $("foot-meta").textContent = `${dev.nights || 0} 晚 · ${(dev.total_events || 0).toLocaleString()} 条事件`;
 }
 
 // ── profile dialog ──────────────────────────────────────────
@@ -2046,13 +2119,13 @@ async function saveProfile(e) {
     // the server replies 200 with an { error } body on write failures — surface it
     // and keep the dialog open instead of pretending the save succeeded.
     if (!r.ok || j.error) {
-      toast(j.error || "Couldn't save profile.", "error");
+      toast(j.error || "无法保存个人资料。", "error");
       return;
     }
     $("profile-dialog").close();
     await load(); // re-runs CVA with the new demographics
   } catch {
-    toast("Couldn't reach the local server.", "error");
+    toast("连接不上本地服务器。", "error");
   } finally {
     $("profile-save").disabled = false;
   }
@@ -2077,36 +2150,38 @@ function toast(msg, kind = "info") {
 function syncHint(msg) {
   msg = msg || "";
   if (/no matching|not found|no device|no ring/i.test(msg))
-    return "Couldn't find your ring. Take it off the charger, keep it nearby, and try again.";
+    return "找不到你的戒指。把它从充电器上取下,放在附近再试一次。";
   if (/key|auth|unauthor/i.test(msg))
-    return "The ring needs its auth key. Start the dashboard with --key-file.";
+    return "戒指需要认证密钥。请用 --key-file 启动仪表盘。";
   if (/timed out|timeout/i.test(msg))
-    return "Bluetooth timed out. Make sure the ring is awake and close, then retry.";
-  return "Sync failed: " + msg;
+    return "蓝牙连接超时。确认戒指已唤醒且在附近,然后重试。";
+  if (/stopped responding/i.test(msg))
+    return "戒指没有响应,这次同步已放弃(已同步的数据会保留)。请稍后再试。";
+  return "同步失败:" + zh(msg);
 }
 
 async function doSync() {
   const btn = $("sync-btn");
   if (btn.classList.contains("syncing")) return;
   btn.classList.add("syncing");
-  $("sync-label").textContent = "Syncing";
-  btn.title = "Connecting to the ring over Bluetooth…";
+  $("sync-label").textContent = "同步中";
+  btn.title = "正在通过蓝牙连接戒指…";
   try {
     const j = await (await postDash("/api/sync")).json();
     if (j.ok) {
-      $("sync-label").textContent = "Synced";
-      toast(j.message && !/^synced$/i.test(j.message) ? j.message : "Ring synced.", "ok");
+      $("sync-label").textContent = "已同步";
+      toast(j.message && !/^synced$/i.test(j.message) ? zh(j.message) : "戒指已同步。", "ok");
       await load();
     } else {
-      $("sync-label").textContent = "Failed";
+      $("sync-label").textContent = "失败";
       toast(syncHint(j.message), "error");
     }
   } catch (e) {
-    $("sync-label").textContent = "Failed";
-    toast("Couldn't reach the local dashboard server.", "error");
+    $("sync-label").textContent = "失败";
+    toast("连接不上本地仪表盘服务器。", "error");
   }
   btn.classList.remove("syncing");
-  setTimeout(() => { $("sync-label").textContent = "Sync"; btn.title = "Sync the ring over Bluetooth"; }, 3000);
+  setTimeout(() => { $("sync-label").textContent = "同步"; btn.title = "通过蓝牙同步戒指"; }, 3000);
 }
 
 // ── live heart rate ─────────────────────────────────────────
@@ -2118,16 +2193,16 @@ let LIVE_ABORT = null;
 function liveHint(msg) {
   msg = msg || "";
   if (/no matching|not found|no device|no ring/i.test(msg))
-    return "Couldn't find your ring. Keep it on your finger, close to the Mac, and try again.";
+    return "找不到你的戒指。请戴在手指上、靠近 Mac,再试一次。";
   if (/key|auth|unauthor/i.test(msg))
-    return "The ring needs its auth key. Start the dashboard with --key-file.";
-  return "Live heart rate failed: " + msg;
+    return "戒指需要认证密钥。请用 --key-file 启动仪表盘。";
+  return "实时心率失败:" + zh(msg);
 }
 
 function liveSummary(beats) {
-  if (!beats.length) return "No beats captured. Make sure the ring is on your finger.";
+  if (!beats.length) return "没有捕捉到心跳。请确认戒指戴在手指上。";
   const avg = Math.round(beats.reduce((a, b) => a + b, 0) / beats.length);
-  return `${beats.length} beats · avg ${avg} · min ${Math.min(...beats)} · max ${Math.max(...beats)} bpm`;
+  return `${beats.length} 次心跳 · 平均 ${avg} · 最低 ${Math.min(...beats)} · 最高 ${Math.max(...beats)} bpm`;
 }
 
 async function toggleLive() {
@@ -2136,10 +2211,10 @@ async function toggleLive() {
   const beats = [];
   const status = $("live-status");
   $("live-btn").classList.add("live-on");
-  $("live-label").textContent = "Stop";
+  $("live-label").textContent = "停止";
   $("live-bpm").textContent = "—";
   $("live-spark").innerHTML = "";
-  status.textContent = "Connecting to the ring… keep your hand near the Mac (up to 2 min).";
+  status.textContent = "正在连接戒指… 请把手放在 Mac 附近(最多 2 分钟)。";
   let end = null;
   try {
     const r = await fetch("/api/live-hr", { method: "POST", headers: { ...DASH_HEADERS }, signal: abort.signal });
@@ -2157,7 +2232,7 @@ async function toggleLive() {
         buf = buf.slice(nl + 1);
         if (!line.trim()) continue;
         const m = JSON.parse(line);
-        if (m.status === "live") status.textContent = "Live. Beats appear as the ring detects them.";
+        if (m.status === "live") status.textContent = "正在实时读取。戒指检测到心跳就会显示。";
         else if (m.bpm != null) {
           beats.push(m.bpm);
           $("live-bpm").textContent = m.bpm;
@@ -2168,17 +2243,17 @@ async function toggleLive() {
           void dot.offsetWidth; // restart the pulse animation
           dot.classList.add("beat");
         } else if (m.error) end = liveHint(m.error);
-        else if (m.done) end = beats.length ? "Done. " + liveSummary(beats) : liveSummary(beats);
+        else if (m.done) end = beats.length ? "完成。" + liveSummary(beats) : liveSummary(beats);
       }
     }
   } catch (e) {
-    if (e.name === "AbortError") end = beats.length ? "Stopped. " + liveSummary(beats) : "Stopped.";
-    else end = "Couldn't reach the local dashboard server.";
+    if (e.name === "AbortError") end = beats.length ? "已停止。" + liveSummary(beats) : "已停止。";
+    else end = "连接不上本地仪表盘服务器。";
   }
   status.textContent = end || liveSummary(beats);
   LIVE_ABORT = null;
   $("live-btn").classList.remove("live-on");
-  $("live-label").textContent = "Start";
+  $("live-label").textContent = "开始";
 }
 
 // ── load ────────────────────────────────────────────────────
@@ -2195,19 +2270,42 @@ function showLoadError(msg) {
   dg.textContent = msg;
 }
 
+// ── auto-refresh: data synced behind the page's back (`oura watch`, a terminal sync) ──
+// Poll the server's cheap version stamp — not the summary — and reload when it moves.
+// Only while the page is in view and the user isn't mid-task (a day page, a dialog,
+// a sync or a live session), so a refresh never yanks something out from under them.
+let DATA_VERSION = null; // the version the current render reflects
+async function dataVersion() {
+  try {
+    return (await (await fetch("/api/data-version")).json()).version ?? null;
+  } catch (_) {
+    return null; // an older server without the endpoint: just no auto-refresh
+  }
+}
+async function autoRefresh() {
+  const busy = document.hidden || document.body.classList.contains("page-open") ||
+    document.querySelector("dialog[open]") || $("sync-btn").classList.contains("syncing") || LIVE_ABORT;
+  if (busy || DATA_VERSION == null) return;
+  const v = await dataVersion();
+  if (v != null && v !== DATA_VERSION) load();
+}
+
 let LOAD_SEQ = 0;
 async function load() {
   // guard against overlapping loads (sync/profile-save during an in-flight build):
   // a slower earlier response must not overwrite a newer one.
   const seq = ++LOAD_SEQ;
+  // read before the summary, so a sync landing mid-load reads as newer on the next poll
+  const version = await dataVersion();
   let d;
   try {
     d = await (await fetch(`/api/summary?tz=${browserTzOffset()}`)).json();
   } catch (e) {
-    if (seq === LOAD_SEQ) showLoadError("Could not reach the local server.");
+    if (seq === LOAD_SEQ) showLoadError("连接不上本地服务器。");
     return;
   }
   if (seq !== LOAD_SEQ) return; // a newer load() superseded this response — drop it
+  DATA_VERSION = version; // also on an error, so the page recovers once data arrives
   if (d.error) {
     showLoadError(d.error);
     return;
@@ -2217,7 +2315,7 @@ async function load() {
   LAST_DEVICE_SERIAL = d.device && d.device.serial;
   $("digest").classList.remove("skeleton", "skeleton-text");
   $("digest").classList.add("reveal");
-  $("digest").innerHTML = (d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
+  $("digest").innerHTML = zh(d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
   renderActions(d);
   renderTiles(d);
   HR_QUARTER_LOAD = null;
@@ -2239,6 +2337,8 @@ $("profile-btn").addEventListener("click", openProfile);
 $("profile-form").addEventListener("submit", saveProfile);
 $("profile-cancel").addEventListener("click", () => $("profile-dialog").close());
 load();
+setInterval(autoRefresh, 60 * 1000);
+document.addEventListener("visibilitychange", autoRefresh);
 
 // ── research export: raw CSVs for a window, built by oura-summary::research_export ──
 (function researchExport() {
@@ -2256,8 +2356,8 @@ load();
     const s = new Date(form.querySelector("#rx-start").value);
     const t = new Date(form.querySelector("#rx-end").value);
     const streams = [...form.querySelectorAll("#rx-streams input:checked")].map((i) => i.value);
-    if (!(t > s)) { status.textContent = "The end must be after the start."; return; }
-    if (!streams.length) { status.textContent = "Choose at least one kind of data."; return; }
+    if (!(t > s)) { status.textContent = "结束时间必须晚于开始时间。"; return; }
+    if (!streams.length) { status.textContent = "请至少选择一种数据。"; return; }
     const q = new URLSearchParams({
       start: String(s.getTime() / 1000), end: String(t.getTime() / 1000),
       streams: streams.join(","), tz: String(-s.getTimezoneOffset() / 60),
@@ -2265,7 +2365,7 @@ load();
     const a = document.createElement("a");
     a.href = `/api/research-export?${q}`;
     document.body.append(a); a.click(); a.remove();
-    status.textContent = "Preparing the ZIP. Your browser will save it when it is ready.";
+    status.textContent = "正在准备 ZIP,准备好后浏览器会自动保存。";
   });
   form.querySelector("#rx-mark").addEventListener("click", async () => {
     const status = form.querySelector("#rx-status");
@@ -2277,9 +2377,9 @@ load();
       });
       const j = await r.json();
       if (j.error) throw new Error(j.error);
-      status.textContent = `Marked at ${new Date(j.unix * 1000).toLocaleTimeString()}. It will be in markers.csv.`;
+      status.textContent = `已在 ${new Date(j.unix * 1000).toLocaleTimeString("zh-CN")} 打上标记,会出现在 markers.csv 里。`;
     } catch (err) {
-      status.textContent = `Could not save the marker: ${err.message}`;
+      status.textContent = `无法保存标记:${err.message}`;
     }
   });
 })();

@@ -115,6 +115,9 @@ a nap doesn't shadow the real sleep.
 - **BLE sync**: iOS syncs **natively** — `RingSync.swift` (CoreBluetooth `BLETransport`)
   drives the Rust `RingSession` FFI (`oura-core`) to authenticate + drain into a writable
   DB. The web dashboard has **no** BLE; it reads a DB produced by the desktop `oura sync`.
+  With no app lifecycle to trigger syncs on desktop, `oura watch` repeats that sync on an
+  interval (the counterpart of iOS's automatic lifecycle sync), and the open page polls
+  `GET /api/data-version` and reloads when a pass lands, as iOS reloads after a sync.
   Both ultimately run the SAME `oura-link` `OuraClient<T: Transport>` over a different
   transport (btleplug on desktop, CoreBluetooth-over-FFI on iOS). Ring 5 history payloads
   are coalesced into 32 KB chunks before crossing UniFFI; control/summary frames stay
@@ -206,6 +209,12 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 
 ## Known gaps (web-only, not yet on iOS)
 
+- **Chinese UI**: the web dashboard is written in Chinese (zh-CN). On the main page, text
+  the server sends in English (oura-summary is shared with the English iOS app: the
+  digest, clock warnings, device-panel names, activity labels) is translated as it is
+  shown by `zh()` / `zhAct()` in `app.js`; unrecognised text is shown as sent. The `/dna`
+  page is web-only end to end, so its server text is Chinese at the source: `dna.rs`
+  messages and the display fields of `dna/catalog.json`. The iOS app is still English.
 - **One-page day view**: web shows Sleep, Activity and Heart rate on one scrolling page, every
   chart on one time axis (`dayAxis`) with a shared cursor (`dayCursor`), plus ‹ › / ← → to step
   through days with data; iOS `DayReportView` keeps tabs and reaches days via `AllDaysView`.
@@ -261,20 +270,6 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   *Network note:* this is the **only** outbound request in the whole app. It fetches
   **public** PGS score *definitions* on explicit user action; the genome never leaves the
   machine.
-
-- **Blood panel** (`/blood`): tracks lab-test markers over time, reads each against its
-  reference range, and surfaces the ones worth attention with plain-language advice. The
-  compute — status (in/out of range), trend across draws, which side is "concerning" per
-  marker, and the attention list — is real and lives in `crates/oura-cli/src/blood.rs`;
-  the front-end is `dashboard/web/blood.{html,js,css}` (each marker card is a
-  reference-band sparkline in the main dashboard's graph idiom, with a full time-series +
-  advice in the detail dialog). **Currently the *inputs* are mocked** — a real SYNLAB draw
-  series, hand-transcribed — so import/extraction is not yet wired. The planned shape:
-  `import` parses an uploaded lab PDF locally, **dedupes by content hash** (re-importing the
-  same file is a no-op), and caches to a small local **SQLite `blood.db`, separate from the
-  ring's `oura.db`**. **Deliberately web-only** — like the DNA explorer it has nothing to do
-  with ring data, does not go through `oura-summary`, and is not mirrored on iOS. When
-  extraction is built, `blood.rs`'s marker model is the reusable brain.
 
 When you close one of these gaps, update this section.
 
@@ -426,4 +421,10 @@ this rule; model caches are invalidated for the clock/bedtime changes.
 The web BLE actions (sync, live HR, feature mode) share one operation gate. Live
 HR drains stderr concurrently, retains only a bounded tail, and kills/reaps a
 stalled or disconnected child before releasing the gate. Hardware/firmware live
-HR support still depends on the pinned BLE implementation.
+HR support still depends on the pinned BLE implementation. `oura sync` abandons a
+pass that stops responding after 10 minutes (that pinned implementation has no
+deadline on GATT writes), so a wedged link can't hold the Sync button, and with it
+the gate, forever. `oura watch` is a
+separate process outside that gate; it contends for the same single BLE link, so
+an action started mid-pass connects once the pass lets go, and a pass that finds
+the ring busy backs off and retries.

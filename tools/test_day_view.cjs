@@ -25,9 +25,9 @@ w.openDayPage(data, '2026-09-26');
 assert(w.document.querySelector('#sec-sleep'));
 assert(w.document.querySelector('#sec-activity'));
 assert(w.document.querySelector('#sec-heart'));
-assert(w.document.querySelector('#sec-sleep').textContent.includes('Incomplete sleep analysis'));
-assert(!w.document.querySelector('#sec-sleep').textContent.includes('Efficiency of'));
-const motion = [...w.document.querySelectorAll('.tl-row')].find(row => row.textContent.includes('Motion'));
+assert(w.document.querySelector('#sec-sleep').textContent.includes('睡眠分析不完整'));
+assert(!/睡眠效率 \d+%,/.test(w.document.querySelector('#sec-sleep').textContent));
+const motion = [...w.document.querySelectorAll('.tl-row')].find(row => row.textContent.includes('动作'));
 // A sparse motion measurement must remain visible and must not become a smooth curve.
 assert(motion, 'motion lane missing');
 assert(!motion.querySelector('path'));
@@ -36,27 +36,27 @@ const nssa = { ...data, nights: [{ ...night, stages_full: new Array(40).fill(2),
   staging_source: 'nssa', stages_5min: [4, 2, 1, 3], stages_t0_unix: start - 20 }] };
 w.openDayPage(nssa, '2026-09-26');
 const lanes = [...w.document.querySelectorAll('.tl-row')].map(row => row.textContent);
-assert(lanes.some(t => t.includes('Stages · 5 min (Oura app)')), '5-minute Oura lane missing');
-assert(lanes.some(t => t.includes('Stages') && !t.includes('5 min')), '30 s stage lane missing');
+assert(lanes.some(t => t.includes('睡眠分期 · 5 分钟(Oura App)')), '5-minute Oura lane missing');
+assert(lanes.some(t => t.includes('睡眠分期') && !t.includes('5 分钟')), '30 s stage lane missing');
 const absent = { ...data, nights: [{ ...night, start_ds: 10000, end_ds: 298000, stages_full: [] }] };
 w.openDayPage(absent, '2026-09-26');
-assert(w.document.querySelector('#sec-sleep').textContent.includes('stages are unavailable'));
-assert(!w.document.querySelector('#sec-sleep').textContent.includes('Incomplete sleep analysis'));
+assert(w.document.querySelector('#sec-sleep').textContent.includes('这一晚没有睡眠分期'));
+assert(!w.document.querySelector('#sec-sleep').textContent.includes('睡眠分析不完整'));
 const editBtn = w.document.querySelector('.bedtime-edit-btn');
 const editorForm = w.document.querySelector('.bedtime-editor');
 assert(editBtn && editorForm && editorForm.hidden);
 editBtn.click();
 assert(!editorForm.hidden);
 setImmediate(async () => {
-  assert(w.document.querySelector('#sec-heart').textContent.includes('No heart-rate readings'));
+  assert(w.document.querySelector('#sec-heart').textContent.includes('还没有心率读数'));
   assert(requests.some(url => url.includes('/api/hourly-hr')));
   w.fetch = async () => ({ ok: true, body: new ReadableStream({start(controller) {
     controller.enqueue(new TextEncoder().encode('{"error":"Ring is busy; wait for the current operation to finish."}\n'));
     controller.close();
   }}) });
   await w.toggleLive();
-  assert(w.document.getElementById('live-status').textContent.includes('Ring is busy'));
-  assert.equal(w.document.getElementById('live-label').textContent, 'Start');
+  assert(w.document.getElementById('live-status').textContent.includes('戒指正忙'));
+  assert.equal(w.document.getElementById('live-label').textContent, '开始');
   console.log('Day view DOM integration checks passed');
   dom.window.close();
 });

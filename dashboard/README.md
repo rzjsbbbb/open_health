@@ -16,6 +16,24 @@ oura dashboard --tz-offset 1 --age 30 --sex M --height 1.78 --weight 75
 
 Default port `8090`; loopback-only.
 
+### Keep it current without the Sync button
+
+Run `oura watch` beside the dashboard. It repeats `oura sync` every `--interval`
+seconds (default 300), so the ring needn't sit on its charger, and an open dashboard
+page reloads by itself within a minute of each pass:
+
+```bash
+oura watch                                   # in its own terminal; Ctrl-C to stop
+```
+
+It finds the auth key the way `sync` does (`--key-file`, `$OURA_KEY_FILE`, or an
+`oura.key` next to the DB). A worn ring is often out of reach — a weak signal, or a
+phone holding its single link — so such a pass backs off (`--retry` seconds, doubling
+up to `--max-backoff`) and the next good one catches up from the saved cursor; nothing
+is lost. A pass that stops responding is abandoned after 10 minutes. `watch` and the
+dashboard's Bluetooth buttons share that one link: a button pressed mid-pass connects
+once the pass lets go.
+
 ## Enable Oura's models on desktop
 
 Without the private model files the dashboard still works — each night falls back to
@@ -64,6 +82,7 @@ so. To stage with Oura's own validated model instead:
 - **Sync button** (header): drains the ring over Bluetooth without leaving the page
   (runs `oura sync` for you, then refreshes). Pass `--name`/`--key-file` so it can
   reach your ring, e.g. `--name "Oura Ring 5" --key-file captures/android/oura-android-auth.key`.
+  A sync that stops responding gives up after 10 minutes instead of holding the ring.
 - **Battery**: read offline from the ring's stored `battery_level_changed` debug
   events; shown in the header and the Device panel.
 - **Your details** (the person icon): edit age / sex / height / weight / ring size.
@@ -95,8 +114,10 @@ actual state. It's best-effort — a failed read never fails the sync.
   computes per-night HRV / resting-HR / skin-temp, SpO2 % (Oura's R→% calibration),
   baselines + deltas, per-day movement profile + active calories, the
   device/data-health panel, and the one-line digest. It serves the page plus a small
-  JSON API: `GET /api/summary`, `GET/POST /api/profile`, `POST /api/sync`,
-  `POST /api/feature` (toggle a capability), and `GET/POST /api/ring-key`. Mutating
+  JSON API: `GET /api/summary`, `GET /api/data-version` (the cheap change stamp the
+  page polls to reload after a background sync), `GET/POST /api/profile`,
+  `POST /api/sync`, `POST /api/feature` (toggle a capability), and
+  `GET/POST /api/ring-key`. Mutating
   endpoints require a same-origin `X-Oura-Dash` header (CSRF guard) and the server is
   loopback-only with a Host-header check.
 - **The AI models run via the Python runners**, shelled out exactly like

@@ -31,9 +31,6 @@ const APP_JS: &str = include_str!("../../../dashboard/web/app.js");
 const DNA_HTML: &str = include_str!("../../../dashboard/web/dna.html");
 const DNA_JS: &str = include_str!("../../../dashboard/web/dna.js");
 const DNA_CSS: &str = include_str!("../../../dashboard/web/dna.css");
-const BLOOD_HTML: &str = include_str!("../../../dashboard/web/blood.html");
-const BLOOD_JS: &str = include_str!("../../../dashboard/web/blood.js");
-const BLOOD_CSS: &str = include_str!("../../../dashboard/web/blood.css");
 
 fn read_ring_key(path: Option<&Path>) -> Result<String> {
     let path = path.ok_or_else(|| anyhow!("dashboard was started without --key-file"))?;
@@ -363,6 +360,26 @@ fn cached_summary(db: &Path, tz: f64) -> Result<Arc<Value>> {
     Ok(value)
 }
 
+/// [`summary_token`] as an opaque string: what the open page polls — cheaply, without
+/// fetching the summary — to notice data written behind its back (`oura watch`, a sync
+/// run in a terminal) and reload. Taken the way [`cached_summary`] takes it, so a new
+/// version means the next `/api/summary` rebuilds.
+fn data_version(db: &Path) -> String {
+    let _ = oura_store::storage::Store::migrate_if_writable(db);
+    let (db_mtime, profile, features, bedtime, decoder) = summary_token(db);
+    let ns = |t: Option<SystemTime>| {
+        t.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    format!(
+        "{}-{}-{}-{}-{decoder}",
+        ns(db_mtime),
+        ns(profile),
+        ns(features),
+        ns(bedtime)
+    )
+}
+
 pub async fn serve(
     port: u16,
     db: PathBuf,
@@ -522,8 +539,6 @@ async fn handle(
             | ("POST", "/api/ring-key")
             | ("GET", "/api/ring-key")
             | ("POST", "/api/dna/fetch")
-            | ("POST", "/api/blood/import-dir")
-            | ("POST", "/api/blood/import")
     ) && !csrf_ok;
     if forbid {
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
@@ -611,54 +626,6 @@ async fn handle(
             )
             .await
         }
-        (_, "/blood") | (_, "/blood.html") => {
-            write_resp(
-                &mut sock,
-                "200 OK",
-                "text/html; charset=utf-8",
-                &asset("blood.html", BLOOD_HTML),
-            )
-            .await
-        }
-        (_, "/blood.js") => {
-            write_resp(
-                &mut sock,
-                "200 OK",
-                "text/javascript; charset=utf-8",
-                &asset("blood.js", BLOOD_JS),
-            )
-            .await
-        }
-        (_, "/blood.css") => {
-            write_resp(
-                &mut sock,
-                "200 OK",
-                "text/css; charset=utf-8",
-                &asset("blood.css", BLOOD_CSS),
-            )
-            .await
-        }
-        ("GET", "/api/blood/report") => {
-            let v = tokio::task::spawn_blocking(crate::blood::report)
-                .await
-                .map_err(|e| anyhow!(e))?;
-            json_resp(&mut sock, &v).await
-        }
-        ("POST", "/api/blood/import-dir") => {
-            let v = tokio::task::spawn_blocking(crate::blood::import_dir)
-                .await
-                .map_err(|e| anyhow!(e))?;
-            json_resp(&mut sock, &v).await
-        }
-        ("POST", "/api/blood/import") => {
-            let req =
-                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
-            let path = req["path"].as_str().unwrap_or("").to_string();
-            let v = tokio::task::spawn_blocking(move || crate::blood::import_path(&path))
-                .await
-                .map_err(|e| anyhow!(e))?;
-            json_resp(&mut sock, &v).await
-        }
         ("GET", "/api/dna/files") => {
             let v = tokio::task::spawn_blocking(crate::dna::list_files)
                 .await
@@ -704,6 +671,12 @@ async fn handle(
                 Ok(v) => json_resp(&mut sock, &v).await,
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
             }
+        }
+        ("GET", "/api/data-version") => {
+            let version = tokio::task::spawn_blocking(move || data_version(&db))
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &json!({ "version": version })).await
         }
         ("GET", "/api/hourly-hr") => {
             // HR bars per `minutes` slot (default hourly, the iOS HeartRate screen's
@@ -869,6 +842,9 @@ async fn handle(
 /// all for a few seconds after a disconnect), so a single short scan often misses a
 /// ring that is right there. We use a longer scan window and retry the transient
 /// "no matching ring" miss a couple of times before giving up.
+///
+/// `sync` abandons a wedged link after 10 minutes, so this can't hold the BLE gate
+/// forever; that error deliberately doesn't match the retry patterns below.
 fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
     let exe = std::env::current_exe().context("locating oura binary")?;
     let mut last = String::from("sync failed");

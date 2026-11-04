@@ -94,7 +94,7 @@ fn mtime(p: &Path) -> Option<SystemTime> {
 /// `GET /api/dna/files` — genomes to explore and scores available to apply.
 pub fn list_files() -> Value {
     let Some(dir) = dna_dir() else {
-        return json!({ "genomes": [], "scores": [], "error": "DNA explorer must run from the repo (dna/ not found)" });
+        return json!({ "genomes": [], "scores": [], "error": "DNA 探索需要在仓库目录里运行(找不到 dna/)" });
     };
     let gdir = genomes_dir();
 
@@ -217,7 +217,7 @@ pub fn report(file: &str, scores_param: &str) -> Value {
         Err(e) => return json!({ "error": e.to_string() }),
     };
     let Some(dir) = dna_dir() else {
-        return json!({ "error": "dna/ not found (catalog + scores live in the repo)" });
+        return json!({ "error": "找不到 dna/(目录和评分都在仓库里)" });
     };
     let selected: Vec<String> = scores_param
         .split(',')
@@ -292,10 +292,10 @@ fn resolve_scores(dir: &Path, catalog: &Catalog, selected: &[String]) -> Result<
             }
         } else if let Some(fname) = key.strip_prefix("pgs:") {
             let fname = safe_name(fname, &[".txt", ".txt.gz"])
-                .ok_or_else(|| anyhow!("invalid score file"))?;
+                .ok_or_else(|| anyhow!("无效的评分文件"))?;
             let path = scores_dir(dir).join(&fname);
             if !path.exists() {
-                return Err(anyhow!("{fname} not found in dna/scores"));
+                return Err(anyhow!("dna/scores 里找不到 {fname}"));
             }
             out.push(pgs::load(&path)?);
         }
@@ -375,10 +375,10 @@ fn valid_pgs_id(id: &str) -> Option<String> {
 /// file from EBI into `dna/scores/`. Only public score definitions are fetched.
 pub fn fetch(pgs_id: &str) -> Value {
     let Some(dir) = dna_dir() else {
-        return json!({ "ok": false, "message": "DNA explorer must run from the repo (dna/ not found)" });
+        return json!({ "ok": false, "message": "DNA 探索需要在仓库目录里运行(找不到 dna/)" });
     };
     let Some(id) = valid_pgs_id(pgs_id) else {
-        return json!({ "ok": false, "message": "expected a PGS Catalog ID like PGS000018" });
+        return json!({ "ok": false, "message": "需要 PGS Catalog ID,例如 PGS000018" });
     };
     let fname = format!("{id}_hmPOS_GRCh38.txt.gz");
     let url = format!("{PGS_BASE}/{id}/ScoringFiles/Harmonized/{fname}");
@@ -392,12 +392,12 @@ pub fn fetch(pgs_id: &str) -> Value {
                 "file": fname,
                 "bytes": bytes,
                 "meta": meta,
-                "message": format!("Fetched {id} ({} KB)", bytes / 1024),
+                "message": format!("已获取 {id}({} KB)", bytes / 1024),
             })
         }
         Err(e) => {
             let _ = std::fs::remove_file(&dest); // don't leave a partial file
-            json!({ "ok": false, "message": format!("Couldn't fetch {id}: {e}") })
+            json!({ "ok": false, "message": format!("无法获取 {id}:{e}") })
         }
     }
 }
@@ -412,25 +412,25 @@ fn download(url: &str, dest: &Path) -> Result<u64> {
         .timeout_read(std::time::Duration::from_secs(120))
         .build();
     let resp = agent.get(url).call().map_err(|e| match e {
-        ureq::Error::Status(404, _) => anyhow!("not found on PGS Catalog (check the ID)"),
-        ureq::Error::Status(code, _) => anyhow!("server returned HTTP {code}"),
+        ureq::Error::Status(404, _) => anyhow!("PGS Catalog 上找不到(请检查 ID)"),
+        ureq::Error::Status(code, _) => anyhow!("服务器返回 HTTP {code}"),
         other => anyhow!(other.to_string()),
     })?;
 
     let tmp = dest.with_extension("part");
     let mut out =
-        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        std::fs::File::create(&tmp).with_context(|| format!("创建 {}", tmp.display()))?;
     let mut reader = resp.into_reader().take(MAX_SCORE_BYTES + 1);
-    let written = std::io::copy(&mut reader, &mut out).context("downloading scoring file")?;
+    let written = std::io::copy(&mut reader, &mut out).context("下载评分文件")?;
     if written > MAX_SCORE_BYTES {
         let _ = std::fs::remove_file(&tmp);
         return Err(anyhow!(
-            "file exceeds the {} MB cap",
+            "文件超过了 {} MB 的上限",
             MAX_SCORE_BYTES / 1_000_000
         ));
     }
     drop(out);
-    std::fs::rename(&tmp, dest).with_context(|| format!("saving {}", dest.display()))?;
+    std::fs::rename(&tmp, dest).with_context(|| format!("保存 {}", dest.display()))?;
     Ok(written)
 }
 
@@ -439,11 +439,11 @@ fn download(url: &str, dest: &Path) -> Result<u64> {
 /// Resolve a genome `file` to its full path inside the configured genomes
 /// directory. Returns `(vcf_path, basename)`.
 fn resolve_genome(file: &str) -> Result<(PathBuf, String)> {
-    let gdir = genomes_dir().context("no genomes directory configured")?;
-    let name = safe_name(file, &[".vcf.gz"]).ok_or_else(|| anyhow!("invalid file name"))?;
+    let gdir = genomes_dir().context("没有设置基因组目录")?;
+    let name = safe_name(file, &[".vcf.gz"]).ok_or_else(|| anyhow!("无效的文件名"))?;
     let vcf = gdir.join(&name);
     if !vcf.exists() {
-        return Err(anyhow!("{name} not found in {}", gdir.display()));
+        return Err(anyhow!("{} 里找不到 {name}", gdir.display()));
     }
     Ok((vcf, name))
 }
