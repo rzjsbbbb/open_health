@@ -115,7 +115,10 @@ actual state. It's best-effort — a failed read never fails the sync.
   baselines + deltas, per-day movement profile + active calories, the
   device/data-health panel, and the one-line digest. It serves the page plus a small
   JSON API: `GET /api/summary`, `GET /api/data-version` (the cheap change stamp the
-  page polls to reload after a background sync), `GET/POST /api/profile`,
+  page polls to reload after a background sync), `GET/POST /api/profile` (demographics plus the optional hypertension-risk answers and
+  heart-rate alert limits), `GET/POST /api/workouts` (logged workouts in
+  `workouts.json`: `{"op":"add", type, start, end, intensity}` / `{"op":"delete", id}`),
+  `POST /api/meals` (logged meals in `meals.json`: `{"op":"add", t, tz}` / `{"op":"delete", id}`),
   `POST /api/sync`, `POST /api/feature` (toggle a capability), and
   `GET/POST /api/ring-key`. Mutating
   endpoints require a same-origin `X-Oura-Dash` header (CSRF guard) and the server is

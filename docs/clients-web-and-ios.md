@@ -209,10 +209,51 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 
 ## Known gaps (web-only, not yet on iOS)
 
+- **Daytime stress and sleep-breathing cards**: `build_summary` now carries `stress`
+  (`tools/run_stress_model.py --json`, Oura's `stress_daytime_sensing_1_1_0` on awake
+  5-min HRV vs the daytime baseline) and `breathing` (`tools/run_models.py bdi --json`,
+  `sleepnet_bdi_0_4_0`: % of sleep epochs with a breathing disturbance, flagged at
+  ≥ 15 %). The web renders them in `renderStress` / `renderBreathing`; iOS's model runner
+  leaves both `None` and has no cards yet. The capability list now has "Daytime stress"
+  (live with HRV) and "Stress resilience" (gated: ~14 days + daily scores).
+
+- **More model cards** (web only): 「心率提醒」 (`hr_alerts`, `run_hilo_hr.py`),
+  「高血压风险」 (`hypertension`, `run_halite_model.py`) and 「运动消耗」 (`workouts`,
+  `run_energy_model.py` over the workouts logged through `/api/workouts` into
+  `workouts.json`, plus the activity model's detected ones). The stress card now shows
+  a day timeline of 5-minute slots, most of them imputed by `dhrv_imputation`. The CVA
+  card shows the calibrator's 30-day median once 14 days are in, and the progress until
+  then. profile.json also stores optional answers (family history, alcohol, smoking,
+  HR alert limits: `PROFILE_EXTRAS` in oura-summary) that only the web profile dialog
+  edits. iOS's runner leaves `energy`, `hr_alerts` and `hypertension` `None`.
+
+- **Steps, training load, resilience, meals** (web only): the summary's `activity_daily`
+  steps / distance come from `step_counter_1_3_0` where it ran (`steps_source: "model"`,
+  else the MET-band estimate iOS still uses). New keys: `training_load`
+  (`run_training_load.py`), `meals` (`run_meal_timing.py` over `/api/meals` →
+  `meals.json`) and `resilience` — added by the dashboard *after* `build_summary`
+  (`run_resilience_model.py` reads the finished summary on stdin). The stress card also
+  shows `stress.events` (acute stress / restoration) and `stress.baselines` (the app's
+  personal baselines once 5 days of measured daytime HRV exist). Workouts carry
+  `steps` / `distance_m`. None of this is on iOS.
+
+- **CVA fallback model**: `run_cva_model.py` uses `cva_2_1_0.pt` when present, else
+  `cva_1_3_0.pt` (raw PPG at 50 Hz, 4 demographics, no weight). `cva_2_1_5.pt` takes
+  128-d embeddings, not raw PPG, so it isn't used. iOS still expects 2.1.0.
+
 - **「今天」 overview**: the web page opens with five large cards for the newest day (sleep
   + efficiency, HRV, resting HR, SpO₂, steps), each with a status word (`renderToday`);
-  the research export is folded into a collapsed 「更多」 section at the bottom. iOS Home
-  keeps its own layout.
+  ‹ › beside its date (or ← → on the keyboard) switch the home page — overview and
+  "Your day" card together — to an earlier day (`homeDay` / `stepHomeDay`), and the one-day model cards follow it
+  (`renderDayCards`: stress + its events, sleep breathing and SpO₂ of the night you
+  woke from, that day's CVA estimate, training-load peak and resilience indices).
+  `run_models.py bdi --json` now returns every recent night (`nights`), not only the last.
+  The day page (`openDayPage`) has a 「白天压力」 section (`stressSection`) on the shared
+  time axis — diverging 5-minute intensity bars and the dHRV against its baseline, with
+  the shared hover cursor — opened from the stress card's 「展开时间轴」 or its timeline.
+  iOS has no stress section. The research
+  export is folded into a collapsed 「更多」 section at the bottom. iOS Home keeps its own
+  layout.
 
 - **Chinese UI**: the web dashboard is written in Chinese (zh-CN). On the main page, text
   the server sends in English (oura-summary is shared with the English iOS app: the

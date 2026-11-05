@@ -90,6 +90,14 @@ pub struct ModelOutputs {
     pub cva: Option<Value>,         // run_cva_model.py
     pub activity: Option<Value>,    // run_activity_model.py
     pub illness: Option<Value>,     // run_illness_model.py (Symptom Radar)
+    pub stress: Option<Value>,      // run_stress_model.py (daytime stress, web only)
+    pub breathing: Option<Value>,   // run_models.py bdi (breathing disturbance, web only)
+    pub energy: Option<Value>,      // run_energy_model.py (workout calories, web only)
+    pub hr_alerts: Option<Value>,   // run_hilo_hr.py (high/low resting HR, web only)
+    pub hypertension: Option<Value>, // run_halite_model.py (hypertension risk, web only)
+    pub steps: Option<Value>,       // run_step_counter.py (per-day steps, web only)
+    pub training_load: Option<Value>, // run_training_load.py (OTS, web only)
+    pub meals: Option<Value>,       // run_meal_timing.py (meal windows, web only)
 }
 
 /// Runs the torch models. `oura-cli` shells out to Python; the native client runs
@@ -118,13 +126,75 @@ pub fn read_profile(db: &Path) -> Demographics {
         .map(|v| Demographics::from_json(&v))
         .unwrap_or_default()
 }
+/// Answers kept in profile.json beside the model demographics, each a number in
+/// `[lo, hi]` or absent: the hypertension-risk questions (`tools/run_halite_model.py`:
+/// family history of cardiovascular disease 0/1, alcohol frequency 0 never … 4 four or
+/// more times a week, ever smoked 0/1, smoking now 0 no / 1 some days / 2 daily) and
+/// the heart-rate alert limits in bpm (`tools/run_hilo_hr.py`). Web dashboard only.
+pub const PROFILE_EXTRAS: [(&str, f64, f64); 6] = [
+    ("cvd_family_history", 0.0, 1.0),
+    ("alcohol_frequency", 0.0, 4.0),
+    ("smoking_history", 0.0, 1.0),
+    ("smoking_current", 0.0, 2.0),
+    ("hr_alert_high", 60.0, 220.0),
+    ("hr_alert_low", 25.0, 100.0),
+];
+
+/// The stored [`PROFILE_EXTRAS`] answers (invalid or missing ones are left out).
+pub fn read_profile_extras(db: &Path) -> serde_json::Map<String, Value> {
+    let stored = std::fs::read_to_string(profile_path(db))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null);
+    PROFILE_EXTRAS
+        .iter()
+        .filter_map(|(key, lo, hi)| {
+            let x = stored.get(*key)?.as_f64()?;
+            (*lo..=*hi).contains(&x).then(|| (key.to_string(), json!(x)))
+        })
+        .collect()
+}
+
+/// The profile as the dashboard edits it: the demographics plus the stored extras.
+pub fn profile_json(db: &Path, demo: Demographics) -> Value {
+    let mut out = demo.to_json();
+    if let Value::Object(map) = &mut out {
+        map.extend(read_profile_extras(db));
+    }
+    out
+}
+
+/// Save the demographics and any [`PROFILE_EXTRAS`] in `v`: a number sets an answer,
+/// `null` clears it, a missing key keeps the stored one.
 pub fn write_profile(db: &Path, v: &Value) -> Result<Demographics> {
     let demo = Demographics::from_json(v);
-    std::fs::write(
-        profile_path(db),
-        serde_json::to_vec_pretty(&demo.to_json())?,
-    )
-    .context("writing profile.json")?;
+    let mut extras = read_profile_extras(db);
+    for (key, lo, hi) in PROFILE_EXTRAS {
+        match v.get(key) {
+            None => {}
+            Some(Value::Null) => {
+                extras.remove(key);
+            }
+            Some(x) => match x.as_f64() {
+                Some(n) if (lo..=hi).contains(&n) => {
+                    extras.insert(key.to_string(), json!(n));
+                }
+                _ => return Err(anyhow!("{key} must be a number from {lo} to {hi}")),
+            },
+        }
+    }
+    let limit = |k: &str| extras.get(k).and_then(Value::as_f64);
+    if let (Some(high), Some(low)) = (limit("hr_alert_high"), limit("hr_alert_low")) {
+        if low >= high {
+            return Err(anyhow!("the low heart-rate limit must be below the high one"));
+        }
+    }
+    let mut out = demo.to_json();
+    if let Value::Object(map) = &mut out {
+        map.extend(extras);
+    }
+    std::fs::write(profile_path(db), serde_json::to_vec_pretty(&out)?)
+        .context("writing profile.json")?;
     Ok(demo)
 }
 
@@ -2428,6 +2498,14 @@ pub fn build_summary(
         cva,
         activity: activity_raw,
         illness,
+        stress,
+        breathing,
+        energy,
+        hr_alerts,
+        hypertension,
+        steps: steps_model,
+        training_load,
+        meals,
     } = runner.run(ModelInputs {
         db,
         tz,
@@ -2839,6 +2917,21 @@ pub fn build_summary(
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
+    // Oura's step_counter model, where it ran, replaces the MET-band step estimate
+    // (the counts and the 0.762 m/step distance); the days it covers say so.
+    let mut activity_daily = activity_daily;
+    if let (Some(model_days), Some(days)) = (
+        steps_model.as_ref().and_then(|v| v["daily"].as_object()),
+        activity_daily.as_object_mut(),
+    ) {
+        for (ymd, m) in model_days {
+            if let (Some(day), Some(n)) = (days.get_mut(ymd), m["steps"].as_f64()) {
+                day["steps"] = json!(n);
+                day["distance_m"] = m["distance_m"].clone();
+                day["steps_source"] = json!("model");
+            }
+        }
+    }
     let activity_profile: Value = prof_sum
         .iter()
         .map(|(k, sums)| {
@@ -2969,7 +3062,21 @@ pub fn build_summary(
             has("real_step_event_feature_1") || has("real_step_event_feature_2"),
             "enable real_steps"
         ),
-        insight("Stress / resilience", false, "needs cloud scores"),
+        insight("Daytime stress", has("hrv_event"), "needs daytime HRV"),
+        insight("Workout calories", has("motion_event"), "needs motion data"),
+        insight(
+            "High/low heart rate",
+            has("green_ibi_quality_event"),
+            "needs daytime heart rate"
+        ),
+        insight(
+            "Hypertension risk",
+            has("cva_raw_ppg_data"),
+            "enable cva_ppg"
+        ),
+        insight("Stress resilience", has("hrv_event"), "needs daytime HRV"),
+        insight("Training load", has("activity_information"), "needs activity data"),
+        insight("Meal timing", true, ""),
     ]);
     let mut battery: Option<(i64, i64, Option<f64>)> = None;
     let mut battery_best_unix: Option<f64> = None;
@@ -3119,7 +3226,7 @@ pub fn build_summary(
         "digest": digest,
         "clock": clock_diag,
         "device": device,
-        "profile": demo.to_json(),
+        "profile": profile_json(db, demo),
         "nights": nights_json,
         "sleep_debt": sleep_debt,
         // Model-free Symptom Radar: the same four biomarkers the torch illness model
@@ -3128,6 +3235,13 @@ pub fn build_summary(
         "symptoms": symptoms,
         "illness": illness,
         "cardio": cva,
+        "stress": stress,
+        "breathing": breathing,
+        "workouts": energy,
+        "hr_alerts": hr_alerts,
+        "hypertension": hypertension,
+        "training_load": training_load,
+        "meals": meals,
         "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
         "activity": activity,
         "activity_profile": activity_profile,

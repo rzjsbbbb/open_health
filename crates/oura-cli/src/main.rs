@@ -136,6 +136,13 @@ enum Command {
         #[arg(long)]
         raw: bool,
     },
+    /// Diagnostic: try each known way of getting live heart rate out of the ring and
+    /// print every notification frame, restoring the defaults afterwards.
+    #[command(hide = true)]
+    ProbeLive {
+        #[arg(long, default_value_t = 12)]
+        step_seconds: u64,
+    },
     /// Show stored event counts from the database (offline).
     Events,
     /// Re-run decoders over already-stored raw event bodies (offline).
@@ -444,6 +451,7 @@ async fn main() -> Result<()> {
             | Command::Watch { .. }
             | Command::Latest
             | Command::LiveHr { .. }
+            | Command::ProbeLive { .. }
             | Command::Accel { .. }
             | Command::SleepAnalyze { .. }
             | Command::Viz { .. }
@@ -474,6 +482,7 @@ async fn main() -> Result<()> {
         } => cmd_watch(&cli, &key, !*no_sync_time, *interval, *retry, *max_backoff).await,
         Command::Latest => cmd_latest(&cli, &key).await,
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
+        Command::ProbeLive { step_seconds } => cmd_probe_live(&cli, &key, *step_seconds).await,
         Command::Accel { seconds } => cmd_accel(&cli, &key, *seconds).await,
         Command::SleepAnalyze { force } => cmd_sleep_analyze(&cli, &key, *force).await,
         Command::Viz { port, minutes } => {
@@ -1351,20 +1360,197 @@ async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64, raw: bool)
 
     println!("Streaming live heart rate for {seconds}s (Ctrl-C to stop early)...");
     let mut count = 0u32;
-    client
-        .live_heart_rate(Duration::from_secs(seconds), raw, |s| {
-            count += 1;
-            println!("  {} bpm (IBI {} ms)", s.bpm, s.ibi_ms);
-            if let Some(store) = &store {
-                let _ = store.insert_reading(&serial, "heart_rate_live", s.bpm as f64, "bpm");
-            }
-        })
-        .await?;
+    // A Ring 4 pushes one live IBI frame per beat (`2f 0f 28 02 <status> 02 0000 <ibi lo>
+    // <ibi hi|validity<<4> …`, the frames `live_heart_rate` decodes) only to a client
+    // subscribed to daytime HR's LATEST values: without the subscription CONNECTED_LIVE
+    // is ACKed (`2f03230200`) and nothing follows; FEATURE_DATA doesn't do it either
+    // (found with `oura probe-live`). So subscribe first, and drop it afterwards.
+    // OURA_LIVE_POLL=1 falls back to reading the beats from the event log instead.
+    use oura_link::transport::Transport;
+    use oura_protocol::protocol::{self, feature, subscription_mode};
+    if std::env::var("OURA_LIVE_POLL").is_ok() {
+        count = live_hr_by_polling(cli, &client, &serial, seconds).await?;
+    } else {
+        let subscribe = |mode| protocol::req_set_feature_subscription(feature::DAYTIME_HR, mode);
+        client
+            .transport()
+            .write(&subscribe(subscription_mode::LATEST))
+            .await
+            .context("subscribing to live heart rate")?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let streamed = client
+            .live_heart_rate(Duration::from_secs(seconds), raw, |s| {
+                count += 1;
+                println!("  {} bpm (IBI {} ms)", s.bpm, s.ibi_ms);
+                if let Some(store) = &store {
+                    let _ = store.insert_reading(&serial, "heart_rate_live", s.bpm as f64, "bpm");
+                }
+            })
+            .await;
+        let _ = client.transport().write(&subscribe(subscription_mode::OFF)).await;
+        streamed?;
+    }
 
     if count == 0 {
         println!("No beats captured. Make sure the ring is worn.");
     }
     let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+/// Fallback live readout (OURA_LIVE_POLL=1) that needs no push frames: keep
+/// daytime HR in CONNECTED_LIVE so the ring measures while connected, and drain the
+/// event log every few seconds, printing the beats of each new green-LED IBI packet
+/// (0x80, firmware quality 1). The drained events are committed like a sync (batch +
+/// cursor), so the next sync neither misses nor refetches them. The first drain is the
+/// backlog since the last sync: only its newest packet is shown.
+async fn live_hr_by_polling(
+    cli: &Cli,
+    client: &OuraClient<BleTransport>,
+    serial: &str,
+    seconds: u64,
+) -> Result<u32> {
+    use oura_protocol::protocol::{feature, feature_mode};
+    const POLL: Duration = Duration::from_secs(3);
+    let store = Store::open(&cli.db)?;
+    client
+        .set_feature_mode(feature::DAYTIME_HR, feature_mode::CONNECTED_LIVE)
+        .await
+        .context("starting live heart rate")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut cursor = store.cursor(serial)?;
+    let mut count = 0u32;
+    let mut first = true;
+    let run: Result<()> = async {
+        while tokio::time::Instant::now() < deadline {
+            let pending = std::cell::RefCell::new(Vec::new());
+            let fresh = std::cell::RefCell::new(Vec::new());
+            let db_err = std::cell::RefCell::new(None);
+            let outcome = client
+                .drain_events(
+                    cursor,
+                    |ev| {
+                        pending.borrow_mut().push(ev.clone());
+                        true
+                    },
+                    |p| {
+                        let events = std::mem::take(&mut *pending.borrow_mut());
+                        match store.commit_batch(serial, &events, p.next_cursor) {
+                            Ok(_) => {
+                                fresh.borrow_mut().extend(events);
+                                true
+                            }
+                            Err(e) => {
+                                *db_err.borrow_mut() = Some(e);
+                                false
+                            }
+                        }
+                    },
+                )
+                .await?;
+            if let Some(e) = db_err.into_inner() {
+                return Err(e).context("storing live heart-rate events");
+            }
+            cursor = outcome.next_cursor;
+            let packets: Vec<Vec<u16>> = fresh
+                .into_inner()
+                .iter()
+                .filter(|e| e.tag == 0x80)
+                .filter_map(|e| e.decoded.as_ref())
+                .map(|d| {
+                    let ibis = d["ibi_ms"].as_array().cloned().unwrap_or_default();
+                    let quality = d["quality"].as_array().cloned().unwrap_or_default();
+                    ibis.iter()
+                        .zip(quality.iter())
+                        .filter(|(_, q)| q.as_u64() == Some(1))
+                        .filter_map(|(ms, _)| ms.as_u64())
+                        .filter(|ms| (300..=2000).contains(ms))
+                        .map(|ms| ms as u16)
+                        .collect()
+                })
+                .collect();
+            let shown: Vec<u16> = if first {
+                packets.last().cloned().unwrap_or_default()
+            } else {
+                packets.concat()
+            };
+            first = false;
+            for ibi in shown {
+                count += 1;
+                println!("  {} bpm (IBI {} ms)", 60_000 / ibi as u32, ibi);
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        Ok(())
+    }
+    .await;
+    // Best-effort restore, as the push path does.
+    let _ = client
+        .set_feature_mode(feature::DAYTIME_HR, feature_mode::AUTOMATIC)
+        .await;
+    run.map(|_| count)
+}
+
+/// `probe-live`: each step writes its request(s), then prints every frame for a few
+/// seconds (`+ms label hex`). The daytime-HR mode, its subscription, realtime and the
+/// ring mode are restored at the end, whatever happened.
+async fn cmd_probe_live(cli: &Cli, key: &Option<[u8; 16]>, step: u64) -> Result<()> {
+    use oura_link::transport::Transport;
+    use oura_protocol::protocol::{self, feature, feature_mode, realtime, subscription_mode};
+    let client = connect(cli).await?;
+    maybe_auth(&client, key).await?;
+    println!("hardware_id={:?}", client.hardware_id().await.ok());
+    println!("firmware={:?}", client.firmware().await.ok().map(|f| f.firmware_version));
+    let t = client.transport();
+    let mut rx = t.subscribe();
+    let started = std::time::Instant::now();
+    let hr = feature::DAYTIME_HR;
+    let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+    let steps: Vec<(&str, Vec<Vec<u8>>, u64)> = vec![
+        ("status", vec![protocol::req_feature_status(hr)], 2),
+        ("latest (idle)", vec![protocol::req_feature_latest(hr)], 2),
+        ("connected_live", vec![protocol::req_set_feature_mode(hr, feature_mode::CONNECTED_LIVE)], step),
+        ("latest x1/s while live", (0..step).map(|_| protocol::req_feature_latest(hr)).collect(), step),
+        ("subscribe feature_data", vec![protocol::req_set_feature_subscription(hr, subscription_mode::FEATURE_DATA)], step),
+        ("subscribe latest", vec![protocol::req_set_feature_subscription(hr, subscription_mode::LATEST)], step),
+        ("status while live", vec![protocol::req_feature_status(hr)], 2),
+        ("realtime on_demand 1 min", vec![protocol::req_set_realtime(realtime::ON_DEMAND, 1, 0)], step),
+        ("ring mode fast hr", vec![hex("310401000000")], step),
+    ];
+    let dump = |label: &str, rx: &mut tokio::sync::broadcast::Receiver<Vec<u8>>| {
+        let mut n = 0;
+        while let Ok(frame) = rx.try_recv() {
+            n += 1;
+            println!("  +{:>6}ms {label:<26} {}", started.elapsed().as_millis(), hex::encode(&frame));
+        }
+        n
+    };
+    for (label, requests, secs) in &steps {
+        println!("--- {label}");
+        let gap = Duration::from_millis((secs * 1000 / requests.len().max(1) as u64).max(200));
+        for req in requests {
+            let _ = t.write(req).await;
+            tokio::time::sleep(gap).await;
+            dump(label, &mut rx);
+        }
+        let rest = Duration::from_secs(*secs).saturating_sub(gap * requests.len() as u32);
+        tokio::time::sleep(rest).await;
+        if dump(label, &mut rx) == 0 && requests.len() == 1 {
+            println!("  (nothing more)");
+        }
+    }
+    println!("--- restoring");
+    for req in [
+        hex("310400000000"),
+        protocol::req_realtime_off(),
+        protocol::req_set_feature_subscription(hr, subscription_mode::OFF),
+        protocol::req_set_feature_mode(hr, feature_mode::AUTOMATIC),
+    ] {
+        let _ = t.write(&req).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    dump("restore", &mut rx);
+    let _ = t.disconnect().await;
     Ok(())
 }
 

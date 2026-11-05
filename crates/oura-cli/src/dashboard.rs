@@ -189,6 +189,8 @@ impl ModelRunner for PythonRunner {
             demo.weight_kg.to_string(),
             "--ring".into(),
             demo.ring_size.to_string(),
+            "--tz".into(),
+            tz.to_string(),
         ];
         let act_args = vec![
             db.display().to_string(),
@@ -197,8 +199,23 @@ impl ModelRunner for PythonRunner {
             "--json".into(),
         ];
         let illness_args = vec![db.display().to_string(), tz.to_string(), "--json".into()];
+        // the web-only runners all take the DB, the offset and --json
+        let tz_args = |extra: &[&str]| {
+            let mut v = vec![db.display().to_string(), "--tz".into(), tz.to_string()];
+            v.extend(extra.iter().map(|a| a.to_string()));
+            v.push("--json".into());
+            v
+        };
+        let stress_args = tz_args(&[]);
+        let bdi_args = vec!["bdi".into(), db.display().to_string(), "--json".into()];
+        let energy_args = tz_args(&["--with-detected"]);
+        let hilo_args = tz_args(&[]);
+        let halite_args = tz_args(&[]);
+        let steps_args = tz_args(&[]);
+        let load_args = tz_args(&[]);
+        let meal_args = tz_args(&[]);
 
-        let (mut sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
+        let mut out = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
                 let sh = s.spawn(|| {
                     run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
@@ -206,27 +223,38 @@ impl ModelRunner for PythonRunner {
                 let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
                 let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
                 let ih = s.spawn(|| run_py_json(r, p, "tools/run_illness_model.py", &illness_args));
-                (
-                    sh.join().ok().flatten(),
-                    ch.join().ok().flatten(),
-                    ah.join().ok().flatten(),
-                    ih.join().ok().flatten(),
-                )
+                let st = s.spawn(|| run_py_json(r, p, "tools/run_stress_model.py", &stress_args));
+                let bh = s.spawn(|| run_py_json(r, p, "tools/run_models.py", &bdi_args));
+                let eh = s.spawn(|| run_py_json(r, p, "tools/run_energy_model.py", &energy_args));
+                let hh = s.spawn(|| run_py_json(r, p, "tools/run_hilo_hr.py", &hilo_args));
+                let th = s.spawn(|| run_py_json(r, p, "tools/run_halite_model.py", &halite_args));
+                let sc = s.spawn(|| run_py_json(r, p, "tools/run_step_counter.py", &steps_args));
+                let tl = s.spawn(|| run_py_json(r, p, "tools/run_training_load.py", &load_args));
+                let mt = s.spawn(|| run_py_json(r, p, "tools/run_meal_timing.py", &meal_args));
+                ModelOutputs {
+                    sleep_batch: sh.join().ok().flatten(),
+                    cva: ch.join().ok().flatten(),
+                    activity: ah.join().ok().flatten(),
+                    illness: ih.join().ok().flatten(),
+                    stress: st.join().ok().flatten(),
+                    breathing: bh.join().ok().flatten(),
+                    energy: eh.join().ok().flatten(),
+                    hr_alerts: hh.join().ok().flatten(),
+                    hypertension: th.join().ok().flatten(),
+                    steps: sc.join().ok().flatten(),
+                    training_load: tl.join().ok().flatten(),
+                    meals: mt.join().ok().flatten(),
+                }
             }),
-            _ => (None, None, None, None),
+            _ => ModelOutputs::default(),
         };
-        if sleep_batch_needs_fallback(sleep_batch.as_ref(), sleep_ranges.len())
+        if sleep_batch_needs_fallback(out.sleep_batch.as_ref(), sleep_ranges.len())
             && !sleep_ranges.is_empty()
         {
             let signals = oura_summary::stage_nights_from_signals(db, sleep_ranges);
-            sleep_batch = merge_sleep_fallback(sleep_batch, signals);
+            out.sleep_batch = merge_sleep_fallback(out.sleep_batch, signals);
         }
-        ModelOutputs {
-            sleep_batch,
-            cva,
-            activity,
-            illness,
-        }
+        out
     }
 }
 
@@ -278,7 +306,18 @@ fn merge_sleep_fallback(python: Option<Value>, signals: Option<Value>) -> Option
 
 /// `build_summary` for the web dashboard — runs the models via Python.
 fn build_summary(db: &Path, tz: f64) -> Result<Value> {
-    oura_summary::build_summary(db, tz, &PythonRunner)
+    let mut value = oura_summary::build_summary(db, tz, &PythonRunner)?;
+    // Stress resilience runs on the finished summary: it needs each night's sleep
+    // score and the day's stress series, which only exist once build_summary is done.
+    if let Some(root) = repo_root() {
+        let py = python_bin(&root);
+        let input = serde_json::to_vec(&value).unwrap_or_default();
+        let args = vec!["--tz".into(), tz.to_string(), "--json".into()];
+        value["resilience"] =
+            run_py_json_stdin(&root, &py, "tools/run_resilience_model.py", &args, &input)
+                .unwrap_or(Value::Null);
+    }
+    Ok(value)
 }
 
 // ── summary cache ─────────────────────────────────────────────────────────────
@@ -299,8 +338,119 @@ type CacheToken = (
     Option<SystemTime>,
     Option<SystemTime>,
     Option<SystemTime>,
+    Option<SystemTime>,
+    Option<SystemTime>,
     i64,
 );
+
+/// Workouts logged in the dashboard (`tools/run_energy_model.py` estimates their
+/// calories), kept next to the DB like profile.json. Web dashboard only.
+fn workouts_path(db: &Path) -> PathBuf {
+    db.parent().unwrap_or(Path::new(".")).join("workouts.json")
+}
+
+/// Meals logged in the dashboard (`tools/run_meal_timing.py` finds their regular
+/// windows), next to the DB. Web dashboard only.
+fn meals_path(db: &Path) -> PathBuf {
+    db.parent().unwrap_or(Path::new(".")).join("meals.json")
+}
+
+/// Add (`{"op":"add", t, tz?, note?}`, unix seconds / UTC offset hours) or delete
+/// (`{"op":"delete", id}`) one logged meal; returns the new list.
+fn edit_meals(db: &Path, req: &Value) -> Result<Vec<Value>> {
+    let path = meals_path(db);
+    let mut list: Vec<Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["meals"].as_array().cloned())
+        .unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    match req["op"].as_str() {
+        Some("add") => {
+            let t = req["t"].as_f64().unwrap_or(f64::NAN);
+            anyhow::ensure!(t.is_finite(), "the meal time is required");
+            anyhow::ensure!(t <= now + 600.0, "the meal can't be in the future");
+            anyhow::ensure!(t >= now - 60.0 * 86400.0, "meals older than 60 days aren't kept");
+            let tz = req["tz"].as_f64().filter(|h| (-14.0..=14.0).contains(h));
+            let note: String = req["note"].as_str().unwrap_or("").chars().take(40).collect();
+            list.push(json!({
+                "id": format!("m{}", (now * 1000.0) as i64),
+                "t": t.round(), "tz": tz, "note": note,
+            }));
+        }
+        Some("delete") => {
+            let id = req["id"].as_str().unwrap_or("");
+            let before = list.len();
+            list.retain(|m| m["id"].as_str() != Some(id));
+            anyhow::ensure!(list.len() < before, "no meal with id {id}");
+        }
+        _ => anyhow::bail!("op must be add or delete"),
+    }
+    list.sort_by(|a, b| a["t"].as_f64().partial_cmp(&b["t"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&json!({ "meals": list }))?)?;
+    std::fs::rename(&tmp, &path).context("writing meals.json")?;
+    Ok(list)
+}
+
+fn read_workouts(db: &Path) -> Vec<Value> {
+    std::fs::read_to_string(workouts_path(db))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["workouts"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// Add (`{"op":"add", type, start, end, intensity, note?}`, unix seconds) or delete
+/// (`{"op":"delete", id}`) one logged workout; returns the new list.
+fn edit_workouts(db: &Path, req: &Value) -> Result<Vec<Value>> {
+    let mut list = read_workouts(db);
+    match req["op"].as_str() {
+        Some("add") => {
+            let kind = req["type"].as_i64().unwrap_or(-1);
+            let (start, end) = (
+                req["start"].as_f64().unwrap_or(f64::NAN),
+                req["end"].as_f64().unwrap_or(f64::NAN),
+            );
+            let intensity = req["intensity"].as_i64().unwrap_or(-1);
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64());
+            anyhow::ensure!(
+                (1..=81).contains(&kind) || kind == 65535,
+                "unknown activity type {kind}"
+            );
+            anyhow::ensure!((-1..=2).contains(&intensity), "intensity must be -1..2");
+            anyhow::ensure!(start.is_finite() && end.is_finite(), "start and end are required");
+            anyhow::ensure!(
+                (5.0 * 60.0..=12.0 * 3600.0).contains(&(end - start)),
+                "a workout lasts 5 minutes to 12 hours"
+            );
+            anyhow::ensure!(end <= now + 3600.0, "the workout can't end in the future");
+            let note: String = req["note"].as_str().unwrap_or("").chars().take(80).collect();
+            list.push(json!({
+                "id": format!("w{}", (now * 1000.0) as i64),
+                "type": kind, "start": start.round(), "end": end.round(),
+                "intensity": intensity, "note": note,
+            }));
+        }
+        Some("delete") => {
+            let id = req["id"].as_str().unwrap_or("");
+            let before = list.len();
+            list.retain(|w| w["id"].as_str() != Some(id));
+            anyhow::ensure!(list.len() < before, "no workout with id {id}");
+        }
+        _ => anyhow::bail!("op must be add or delete"),
+    }
+    list.sort_by(|a, b| a["start"].as_f64().partial_cmp(&b["start"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    let path = workouts_path(db);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&json!({ "workouts": list }))?)?;
+    std::fs::rename(&tmp, &path).context("writing workouts.json")?;
+    Ok(list)
+}
 
 /// mtimes of every input the summary depends on plus the store decoder version — any
 /// change rebuilds it. Covers a sync (oura.db), a profile edit (profile.json), a
@@ -312,6 +462,8 @@ fn summary_token(db: &Path) -> CacheToken {
         mtime(&profile_path(db)),
         mtime(&feature_modes_path(db)),
         mtime(&bedtime_overrides_path(db)),
+        mtime(&workouts_path(db)),
+        mtime(&meals_path(db)),
         oura_store::storage::DECODER_VERSION,
     )
 }
@@ -366,17 +518,19 @@ fn cached_summary(db: &Path, tz: f64) -> Result<Arc<Value>> {
 /// version means the next `/api/summary` rebuilds.
 fn data_version(db: &Path) -> String {
     let _ = oura_store::storage::Store::migrate_if_writable(db);
-    let (db_mtime, profile, features, bedtime, decoder) = summary_token(db);
+    let (db_mtime, profile, features, bedtime, workouts, meals, decoder) = summary_token(db);
     let ns = |t: Option<SystemTime>| {
         t.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_nanos())
     };
     format!(
-        "{}-{}-{}-{}-{decoder}",
+        "{}-{}-{}-{}-{}-{}-{decoder}",
         ns(db_mtime),
         ns(profile),
         ns(features),
-        ns(bedtime)
+        ns(bedtime),
+        ns(workouts),
+        ns(meals)
     )
 }
 
@@ -486,6 +640,45 @@ async fn json_resp(sock: &mut TcpStream, v: &Value) -> Result<()> {
     .await
 }
 
+/// Largest request (headers + body) the dashboard accepts; its bodies are small JSON.
+const MAX_REQUEST: usize = 1 << 20;
+
+/// Read one whole HTTP request: the headers, then `Content-Length` bytes of body.
+///
+/// A single `read` isn't enough — WKWebView (the macOS Open Oura window) sends the
+/// headers and a POST body in separate packets. Answering after the first one dropped
+/// the body, and closing with it unread made the kernel reset the connection, so the
+/// page saw a network error (e.g. "connection failed" on saving the profile).
+async fn read_request(sock: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut raw = Vec::with_capacity(8192);
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = sock.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(raw);
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&raw[..end]);
+            let len = header(&head, "content-length")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            let want = (end + 4).saturating_add(len).min(MAX_REQUEST);
+            while raw.len() < want {
+                let n = sock.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+            }
+            return Ok(raw);
+        }
+        if raw.len() >= MAX_REQUEST {
+            return Ok(raw);
+        }
+    }
+}
+
 async fn handle(
     mut sock: TcpStream,
     port: u16,
@@ -494,9 +687,11 @@ async fn handle(
     name: String,
     key_file: Option<PathBuf>,
 ) -> Result<()> {
-    let mut buf = [0u8; 8192];
-    let n = sock.read(&mut buf).await?;
-    let req = String::from_utf8_lossy(&buf[..n]);
+    // A client that stalls mid-request mustn't hold its task forever.
+    let raw = tokio::time::timeout(std::time::Duration::from_secs(15), read_request(&mut sock))
+        .await
+        .map_err(|_| anyhow!("request read timed out"))??;
+    let req = String::from_utf8_lossy(&raw);
     let method = req.split_whitespace().next().unwrap_or("GET");
     let target = req.split_whitespace().nth(1).unwrap_or("/");
     // route on the path only — a query string (e.g. cache-buster) must not 404 the API
@@ -531,6 +726,8 @@ async fn handle(
     let forbid = matches!(
         (method, path),
         ("POST", "/api/profile")
+            | ("POST", "/api/workouts")
+            | ("POST", "/api/meals")
             | ("POST", "/api/research-marker")
             | ("POST", "/api/bedtime")
             | ("POST", "/api/sync")
@@ -745,11 +942,32 @@ async fn handle(
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
             }
         }
-        ("GET", "/api/profile") => json_resp(&mut sock, &read_profile(&db).to_json()).await,
+        ("GET", "/api/profile") => {
+            json_resp(&mut sock, &oura_summary::profile_json(&db, read_profile(&db))).await
+        }
+        ("GET", "/api/workouts") => {
+            json_resp(&mut sock, &json!({ "workouts": read_workouts(&db) })).await
+        }
+        ("POST", "/api/workouts") => {
+            let req =
+                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            match edit_workouts(&db, &req) {
+                Ok(list) => json_resp(&mut sock, &json!({ "ok": true, "workouts": list })).await,
+                Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+            }
+        }
+        ("POST", "/api/meals") => {
+            let req =
+                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            match edit_meals(&db, &req) {
+                Ok(list) => json_resp(&mut sock, &json!({ "ok": true, "meals": list })).await,
+                Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+            }
+        }
         ("POST", "/api/profile") => {
             match serde_json::from_str::<Value>(body.trim_end_matches('\0')) {
                 Ok(v) => match write_profile(&db, &v) {
-                    Ok(d) => json_resp(&mut sock, &d.to_json()).await,
+                    Ok(d) => json_resp(&mut sock, &oura_summary::profile_json(&db, d)).await,
                     Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
                 },
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,

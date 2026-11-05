@@ -27,7 +27,18 @@ const ZH_TERMS = {
   // device panel: insights (with their status and reason), data streams, capabilities
   "Sleep stages": "睡眠分期", "Apnea / breathing": "呼吸暂停 / 呼吸", "Cardiovascular age": "心血管年龄",
   "SpO2": "血氧", "Activity sessions": "活动记录", "HRV / resting HR": "HRV / 静息心率", "Steps": "步数",
-  "Stress / resilience": "压力 / 恢复力",
+  "Stress / resilience": "压力 / 恢复力", "Daytime stress": "白天压力", "Stress resilience": "抗压能力",
+  "needs daytime HRV": "需要白天的 HRV 读数", "needs ~14 days + daily scores": "需要约 14 天数据和每日评分",
+  "Workout calories": "运动消耗", "High/low heart rate": "心率提醒", "Hypertension risk": "高血压风险",
+  "Training load": "训练负荷", "Meal timing": "用餐规律", "needs activity data": "需要活动数据",
+  "needs motion data": "需要动作数据", "needs daytime heart rate": "需要白天的心率数据",
+  // workout / profile errors from the server
+  "a workout lasts 5 minutes to 12 hours": "一次运动的时长要在 5 分钟到 12 小时之间。",
+  "the workout can't end in the future": "运动结束时间不能在未来。",
+  "start and end are required": "请填写开始和结束时间。",
+  "the low heart-rate limit must be below the high one": "心率下限要低于上限。",
+  "the meal can't be in the future": "用餐时间不能在未来。", "the meal time is required": "请填写用餐时间。",
+  "meals older than 60 days aren't kept": "只能记录最近 60 天内的用餐。",
   "needs overnight IBI": "需要夜间心跳间期数据", "enable cva_ppg": "需开启 cva_ppg", "enable spo2": "需开启 spo2",
   "enable real_steps": "需开启 real_steps", "needs cloud scores": "需要云端评分",
   live: "可用", gated: "暂不可用",
@@ -39,6 +50,11 @@ const ZH_TERMS = {
 };
 const zhSpan = (n, unit) => `${n} ${unit === "days" ? "天" : "小时"}`;
 const ZH_RULES = [
+  // energy model's own checks ("10, Error, workout length less than 10 minutes")
+  [/^\d+, Error, workout length less than 10 minutes$/, "运动时长不足 10 分钟,模型无法估算。"],
+  [/^\d+, Error, too little (motion|step_motion|temperature) data$/, "这段时间戒指的数据太少,模型无法估算。"],
+  [/^unknown activity type .*/, "未知的运动类型。"],
+  [/^(\w+) must be a number from ([\d.]+) to ([\d.]+)$/, "$1 要在 $2 到 $3 之间。"],
   // make_digest: "HRV -15%, resting HR -2 bpm. Recovery dipping, take it easy."
   [/resting HR ([+-]?\d+) bpm/, "静息心率 $1 bpm"],
   [/, (?=静息心率)/, ","],
@@ -223,28 +239,38 @@ const relAge = (diff) => {
 };
 
 // The 「今天」 overview at the top: the five numbers worth a glance, each with a plain
-// status word, for the newest day (the same day and night the "Your day" card shows).
+// status word, for the home page's day (homeDay: the newest unless ‹ › / ← → picked
+// another) — the same day and night the "Your day" card shows.
 function renderToday(d) {
   const box = $("tiles");
   box.innerHTML = "";
   box.classList.add("reveal");
-  const ymd = dayKeys(d)[0];
-  const now = new Date();
-  const todayYmd = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  $("today-label").textContent = !ymd || ymd === todayYmd ? "今天" : dayTitle(ymd);
+  const days = dayKeys(d);
+  const ymd = homeDay(d);
+  const local = (t) => `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  const now = new Date(), yest = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  $("today-label").textContent = !ymd ? "今天"
+    : ymd === local(now) ? `今天 · ${fmtDay(ymd)}`
+    : ymd === local(yest) ? `昨天 · ${fmtDay(ymd)}`
+    : dayTitle(ymd);
+  $("home-older").disabled = !ymd || days.indexOf(ymd) >= days.length - 1;
+  $("home-newer").disabled = !ymd || days.indexOf(ymd) <= 0;
   const n = (ymd && nightForDay(d, ymd)) || {};
 
   const asleepMin = n.metrics?.asleep_min;
   const sleepH = asleepMin != null ? asleepMin / 60 : n.in_bed_h;
   const eff = n.efficiency;
-  box.append(metricCard("睡眠", sleepH != null ? Math.round(sleepH * 10) / 10 : "—", " 小时", {
+  box.append(metricCard("睡着", sleepH != null ? Math.round(sleepH * 10) / 10 : "—", sleepH != null ? " 小时" : "", {
     status: eff == null ? null : eff >= 85 ? { label: "正常", kind: "ok" } : eff >= 75 ? { label: "一般", kind: "neutral" } : { label: "偏低", kind: "warn" },
-    sub: n.start ? `效率 ${num(eff)}% · ${esc(n.start)}–${esc(n.end)}` : "还没有睡眠记录",
+    sub: n.start ? `在床 ${num(n.in_bed_h)} 小时(${esc(n.start)}–${esc(n.end)})· 效率 ${num(eff)}%` : "还没有睡眠记录",
   }));
 
+  // that night's HRV / resting HR against the current personal baseline
   const hv = d.vitals?.hrv || {}, rh = d.vitals?.rhr || {};
-  box.append(metricCard("HRV", hv.latest, " ms", { deltaPct: hv.delta_pct, ref: hv.baseline, good: "up" }));
-  box.append(metricCard("静息心率", rh.latest, " bpm", { deltaPct: rh.delta_pct, ref: rh.baseline, good: "down" }));
+  const vsBase = (v, base) => (v != null && base ? Math.round(((v - base) / base) * 100) : null);
+  const noBase = n.start ? "再积累几晚数据才有基线" : "这一天没有睡眠数据";
+  box.append(metricCard("HRV", n.hrv_ms ?? "—", n.hrv_ms != null ? " ms" : "", { deltaPct: vsBase(n.hrv_ms, hv.baseline), ref: hv.baseline, good: "up", sub: noBase }));
+  box.append(metricCard("静息心率", n.rhr ?? "—", n.rhr != null ? " bpm" : "", { deltaPct: vsBase(n.rhr, rh.baseline), ref: rh.baseline, good: "down", sub: noBase }));
 
   const spo2 = n.spo2_mean;
   const spo2On = (d.device?.measuring || []).some((m) => m.name === "SpO2" && m.on);
@@ -314,6 +340,45 @@ function sessionsForDay(d, ymd) {
       return { ...s, start: (h || 0) * 60 + (m || 0) };
     })
     .sort((a, b) => a.start - b.start);
+}
+
+// The home page's day: newest by default; ‹ › and ← → step through the days with data.
+// HOME_DAY stays null while you're on the newest day, so it follows new days as they
+// arrive (past midnight, or after a sync); an auto-refresh keeps a picked day.
+let HOME_DAY = null;
+let LAST_SUMMARY = null;
+function homeDay(d) {
+  const days = dayKeys(d);
+  return HOME_DAY && days.includes(HOME_DAY) ? HOME_DAY : days[0];
+}
+function stepHomeDay(dir) { // -1 = older, +1 = newer
+  if (!LAST_SUMMARY) return;
+  const days = dayKeys(LAST_SUMMARY); // newest first
+  const j = days.indexOf(homeDay(LAST_SUMMARY)) - dir;
+  if (j < 0 || j >= days.length) return;
+  HOME_DAY = j === 0 ? null : days[j];
+  renderToday(LAST_SUMMARY);
+  renderDay(LAST_SUMMARY);
+  renderDayCards(LAST_SUMMARY);
+}
+// Jump the home page (and every card that follows it) to `ymd`.
+function goHomeDay(ymd) {
+  if (!LAST_SUMMARY) return;
+  const days = dayKeys(LAST_SUMMARY);
+  HOME_DAY = !days.includes(ymd) || ymd === days[0] ? null : ymd;
+  renderToday(LAST_SUMMARY);
+  renderDay(LAST_SUMMARY);
+  renderDayCards(LAST_SUMMARY);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+// The model cards that show one day follow the home page's day (the ‹ › at the top).
+function renderDayCards(d) {
+  renderCardio(d);
+  renderSpo2(d);
+  renderStress(d);
+  renderBreathing(d);
+  renderTrainingLoad(d);
+  renderResilience(d);
 }
 
 const dayTitle = (ymd) => {
@@ -445,7 +510,7 @@ function renderDay(d) {
     $("sleep-legend").hidden = true;
     return;
   }
-  const top = days[0];
+  const top = homeDay(d);
   $("sleep-legend").hidden = !(nightForDay(d, top) || {}).stages;
   box.append(dayCard(d, top));
   if (days.length > 1) {
@@ -602,26 +667,545 @@ function renderCardio(d) {
     if (vo2Kv) { const kvs = el("div", "kvs"); kvs.append(vo2Kv); box.append(kvs); }
     return;
   }
-  box.append(el("div", "big-metric", `<span class="n">${cv.vascular_age}</span><span class="u">岁 · 血管年龄</span>`));
-  box.append(el("div", "sub", `${relAge(cv.vascular_age - cv.chronological_age).long}(实际年龄 ${cv.chronological_age} 岁)`));
+  // The calibrator's 30-day median is the number Oura shows; until 14 days are in,
+  // show the newest day's estimate and how far along the baseline is.
+  // the home page's day: that day's estimate (and the smoothed value as of then)
+  const ymd = homeDay(d);
+  const day = (cv.history || []).find((h) => h.date === ymd);
+  const pick = day || { vascular_age: cv.vascular_age, smoothed: cv.smoothed_vascular_age, pwv_ms: cv.pwv_ms, segments: cv.segments, date: cv.date };
+  const smoothed = pick.smoothed;
+  const age = smoothed ?? pick.calibrated ?? pick.vascular_age;
+  box.append(el("div", "big-metric",
+    `<span class="n">${age}</span><span class="u">岁 · ${smoothed != null ? "血管年龄" : "当日估算"} · ${dayTitle(pick.date)}</span>`));
+  box.append(el("div", "sub", `${relAge(age - cv.chronological_age).long}(实际年龄 ${cv.chronological_age} 岁)` +
+    (day ? "" : `。${dayTitle(ymd)}没有 PPG 测量,显示的是最近一次`)));
+  const need = cv.days_needed || 14, have = Math.min(cv.days_with_data || 0, need);
+  if (smoothed == null && cv.calibrator) {
+    const prog = el("div", "cv-prog");
+    prog.innerHTML = `<div class="cv-prog-t">Oura 用最近 30 天里至少 ${need} 天的数据取中位数,才给出正式数值:已有 ${have}/${need} 天</div>` +
+      `<div class="gauge"><i style="width:${Math.round((100 * have) / need)}%"></i></div>`;
+    box.append(prog);
+  }
+  const hist = (cv.history || []).filter((h) => h.vascular_age != null);
+  if (hist.length >= 2) {
+    const vals = hist.map((h) => h.calibrated ?? h.vascular_age);
+    const lo = Math.min(...vals) - 1, hi = Math.max(...vals) + 1;
+    const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * 100},${30 - ((v - lo) / (hi - lo)) * 30}`).join(" ");
+    const sp = el("div", "cv-spark");
+    sp.innerHTML = `<svg viewBox="0 0 100 30" preserveAspectRatio="none"><polyline points="${pts}" /></svg>` +
+      `<div class="cv-spark-l"><span>${fmtDay(hist[0].date)}</span><span>每日估算</span><span>${fmtDay(hist[hist.length - 1].date)}</span></div>`;
+    box.append(sp);
+  }
   const kvs = el("div", "kvs");
-  kvs.append(el("div", "kv", `<div class="k">脉搏波速度</div><div class="v">${cv.pwv_ms != null ? cv.pwv_ms + " m/s" : "—"}</div>`));
-  kvs.append(el("div", "kv", `<div class="k">分析片段数</div><div class="v">${num(cv.segments)}</div>`));
+  kvs.append(el("div", "kv", `<div class="k">脉搏波速度</div><div class="v">${pick.pwv_ms != null ? pick.pwv_ms + " m/s" : "—"}</div>`));
+  kvs.append(el("div", "kv", `<div class="k">当天的分析片段</div><div class="v">${num(pick.segments)}</div>`));
   if (vo2Kv) kvs.append(vo2Kv);
   box.append(kvs);
+}
+
+// Daytime stress — Oura's stress_daytime_sensing model on awake, sedentary 5-min slots:
+// the ring's own HRV where it measured one, dhrv_imputation's estimate everywhere else.
+const STRESS_ZONE = {
+  restored: { label: "放松", cls: "st-restored" },
+  neutral: { label: "平稳", cls: "st-neutral" },
+  stressed: { label: "紧张", cls: "st-stressed" },
+};
+const fmtMins = (m) => (m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时${m % 60 ? ` ${m % 60} 分` : ""}`);
+const clockOf = (unix) => { const t = new Date(unix * 1000); return `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`; };
+function renderStress(d) {
+  const box = $("stress");
+  box.innerHTML = "";
+  const st = d.stress;
+  if (!st) {
+    box.append(el("div", "error", "压力模型没有运行(需要 Python + torch 和 stress_daytime_sensing 模型)。"));
+    return;
+  }
+  const dated = (st.samples || []).filter((s) => s.unix != null);
+  if (!dated.length) {
+    box.append(el("div", "error", "还没有白天清醒、静坐时的心率和 HRV 数据。白天戴着戒指,数据会慢慢积累。"));
+    return;
+  }
+  // the most recent local day with at least 3 hours of scored slots (else the newest)
+  const slot = st.slot_minutes || 5;
+  const byDay = new Map();
+  for (const s of dated) {
+    const k = localYmd(s.unix);
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k).push(s);
+  }
+  // the home page's day (the ‹ › at the top)
+  const lastDay = homeDay(d);
+  const show = (k) => goHomeDay(k);
+  const day = byDay.get(lastDay);
+  if (!day) {
+    box.append(el("div", "big-metric", `<span class="n">—</span><span class="u">${dayTitle(lastDay)}</span>`));
+    box.append(el("div", "sub", "这一天没有白天清醒、静坐时的压力数据。"));
+    const near = [...byDay.keys()].reverse().slice(0, 3);
+    const note = el("div", "sub st-ev-none", "有数据的日子:");
+    for (const k of near) {
+      const a = el("a", "link-day", dayTitle(k));
+      a.href = "#";
+      a.addEventListener("click", (ev) => { ev.preventDefault(); show(k); });
+      note.append(a);
+    }
+    box.append(note);
+    return;
+  }
+  const mins = (z) => day.filter((s) => s.zone === z).length * slot;
+  const [r, n, x] = [mins("restored"), mins("neutral"), mins("stressed")];
+  const verdict = x > r * 1.25 ? "偏紧张" : r > x * 1.25 ? "偏放松" : "平稳";
+  box.append(el("div", "big-metric", `<span class="n">${verdict}</span><span class="u">${dayTitle(lastDay)}</span>`));
+  box.append(el("div", "sub", `紧张 ${fmtMins(x)} · 放松 ${fmtMins(r)} · 平稳 ${fmtMins(n)}`));
+
+  // timeline: one cell per scored 5-minute slot, placed on the day's clock
+  const t0 = day[0].unix - slot * 60, t1 = day[day.length - 1].unix;
+  const span = Math.max(t1 - t0, 3600);
+  const line = el("div", "st-line st-open");
+  line.title = "点击展开这一天的压力时间轴";
+  line.addEventListener("click", () => openDayPage(d, lastDay, "stress"));
+  for (const s of day) {
+    const z = STRESS_ZONE[s.zone] || STRESS_ZONE.neutral;
+    const cell = el("i", z.cls + (s.imputed ? " st-imp" : ""));
+    cell.style.left = `${((s.unix - slot * 60 - t0) / span) * 100}%`;
+    cell.style.width = `${Math.max(((slot * 60) / span) * 100, 0.4)}%`;
+    cell.title = `${clockOf(s.unix - slot * 60)}–${clockOf(s.unix)} ${z.label} · HRV ${Math.round(s.dhrv)} ms${s.imputed ? "(模型补全)" : "(实测)"}`;
+    line.append(cell);
+  }
+  box.append(line);
+  box.append(el("div", "st-axis", `<span>${clockOf(t0)}</span><span>${clockOf(t0 + span / 2)}</span><span>${clockOf(t1)}</span>`));
+  // acute stress / restoration events (Oura's astd model) of the shown day; when it
+  // has none, point at the latest days that do
+  const allEvents = st.events || [];
+  const events = allEvents.filter((e) => localYmd(e.end) === lastDay);
+  const kind = (e) => (e.kind === "stressed" ? "持续紧张" : "持续恢复");
+  if (events.length) {
+    const list = el("div", "hr-eps");
+    for (const e of events) {
+      list.append(el("div", `hr-ep ${e.kind === "stressed" ? "hr-high" : "hr-low"}`,
+        `<span class="hr-ep-t">${clockOf(e.start)}–${clockOf(e.end)}</span>` +
+        `<span class="hr-ep-v"><b class="hr-ep-k">${kind(e)}</b> ${e.minutes} 分钟</span>`));
+    }
+    box.append(list);
+  } else {
+    const weekAgo = Date.now() / 1000 - 7 * 86400;
+    const others = allEvents.filter((e) => e.end >= weekAgo && localYmd(e.end) !== lastDay).slice(-3);
+    const note = el("div", "sub st-ev-none", "这一天没有持续紧张或持续恢复的时段(连续约 1 小时明显偏离基线才算)。");
+    for (const e of others) {
+      const a = el("a", "link-day", `${dayTitle(localYmd(e.end))} ${clockOf(e.start)}–${clockOf(e.end)} ${kind(e)} ${e.minutes} 分钟`);
+      a.href = "#";
+      a.addEventListener("click", (ev) => { ev.preventDefault(); show(localYmd(e.end)); });
+      note.append(el("br"), "最近:", a);
+    }
+    box.append(note);
+  }
+  const b = st.baselines;
+  if (b) {
+    box.append(el("div", "sub st-base", b.source === "oura"
+      ? `个人基线:Oura 的短期基线模型(${b.days} 天白天实测 HRV)`
+      : `个人基线:临时值(已有 ${b.days}/${b.days_needed} 天白天实测 HRV,攒够后改用 Oura 的短期基线模型)`));
+  }
+  const imputed = day.filter((s) => s.imputed).length;
+  box.append(el("div", "il-foot",
+    `${day.length - imputed} 个实测 + ${imputed} 个由模型补全的 5 分钟时段 · 与你白天 HRV 的典型水平 ${Math.round(st.dhrv_baseline)} ms 比较,` +
+    `高于为放松,低于为紧张 · 只统计清醒、静坐的时段`));
+}
+function localYmd(unix) {
+  const t = new Date(unix * 1000);
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+}
+
+// Breathing disturbance — Oura's sleepnet_bdi model on the latest night's heartbeats.
+function renderBreathing(d) {
+  const box = $("breathing");
+  box.innerHTML = "";
+  const all = d.breathing && (d.breathing.nights || (d.breathing.bdi_pct != null ? [d.breathing] : []));
+  if (!all || !all.length) {
+    box.append(el("div", "error", "需要一晚戴着戒指睡觉的心跳数据,以及 sleepnet_bdi 模型。"));
+    return;
+  }
+  const ymd = homeDay(d);
+  const b = all.find((x) => localYmd(x.bedtime_end_unix) === ymd);
+  if (!b || b.bdi_pct == null) {
+    box.append(el("div", "big-metric", `<span class="n">—</span><span class="u">${dayTitle(ymd)}</span>`));
+    box.append(el("div", "sub", "这一天醒来前的那晚没有足够的心跳数据(需要戴着戒指睡满 3 小时)。"));
+    return;
+  }
+  const level = b.elevated ? { t: "偏多", cls: "warn" } : b.bdi_pct >= 5 ? { t: "略多", cls: "warn" } : { t: "正常", cls: "ok" };
+  box.append(el("div", "big-metric", `<span class="n">${b.bdi_pct}%</span><span class="u">睡眠时间有呼吸紊乱 · ${level.t}</span>`));
+  box.append(el("div", "sub",
+    `${dayTitle(localYmd(b.bedtime_end_unix))}醒来前的一晚,睡着的 ${Math.round(b.sleep_min / 6) / 10} 小时里有 ${b.flagged_epochs} 个 30 秒片段被标记。` +
+    `模型在超过 15% 时判定为偏多。`));
+  const kvs = el("div", "kvs");
+  kvs.append(el("div", "kv", `<div class="k">非 REM 睡眠</div><div class="v">${b.bdi_nrem_pct ?? "—"}%</div>`));
+  kvs.append(el("div", "kv", `<div class="k">REM 睡眠</div><div class="v">${b.bdi_rem_pct ?? "—"}%</div>`));
+  box.append(kvs);
+  box.append(el("div", "il-foot",
+    `${b.quality_ok ? "" : "数据覆盖不足,结果仅供参考 · "}由心跳间隔推断,不是医学诊断;担心睡眠呼吸暂停请咨询医生`));
+}
+
+// High / low resting heart rate — Oura's high_low_hr model on resting 10-minute windows.
+function renderHrAlerts(d) {
+  const box = $("hr-alerts");
+  box.innerHTML = "";
+  const h = d.hr_alerts;
+  if (!h) {
+    box.append(el("div", "error", "需要 high_low_hr 模型和戒指的心跳数据。"));
+    return;
+  }
+  const lo = h.low_threshold, hi = h.high_threshold;
+  const week = (h.episodes || []).filter((e) => e.end >= Date.now() / 1000 - 7 * 86400);
+  box.append(el("div", "big-metric",
+    `<span class="n">${week.length}</span><span class="u">次 · 最近 7 天静止时心率超出 ${lo}–${hi} bpm</span>`));
+  box.append(el("div", "sub", h.windows
+    ? `检查了 ${h.windows} 个 10 分钟的静止时段,心率在 ${h.resting_hr_range[0]}–${h.resting_hr_range[1]} bpm 之间(中位数 ${h.resting_hr_median})。`
+    : "还没有足够的静止时段数据。"));
+  if (week.length) {
+    const list = el("div", "hr-eps");
+    for (const e of week.slice(-8).reverse()) {
+      list.append(el("div", `hr-ep hr-${e.kind}`,
+        `<span class="hr-ep-t">${dayTitle(localYmd(e.start))} ${clockOf(e.start)}–${clockOf(e.end)}</span>` +
+        `<span class="hr-ep-v"><b class="hr-ep-k">${e.kind === "high" ? "偏高" : "偏低"}</b> ${e.hr} bpm · ${e.minutes} 分钟</span>`));
+    }
+    box.append(list);
+  }
+  const foot = el("div", "il-foot");
+  foot.innerHTML = `只看静止(MET < 1.8)的时段,活动中的高心率不算 · <a href="#" class="link-profile">修改上下限</a>`;
+  box.append(foot);
+}
+
+// Hypertension risk — Oura's halite model (PulseNet on the ring's PPG + a tree model).
+const BP_LEVEL = { low: { t: "低", cls: "ok" }, moderate: { t: "中", cls: "warn" }, high: { t: "高", cls: "bad" } };
+function renderHypertension(d) {
+  const box = $("hypertension");
+  box.innerHTML = "";
+  const h = d.hypertension;
+  if (!h) {
+    box.append(el("div", "error", "需要开启 cva_ppg(戒指的 PPG 采样)以及 halite 模型。"));
+    return;
+  }
+  const lv = BP_LEVEL[h.risk_level] || BP_LEVEL.low;
+  const pct = Math.round(h.risk_probability * 100);
+  box.append(el("div", "big-metric", `<span class="n bp-${lv.cls}">${lv.t}</span><span class="u">风险 · 概率 ${pct}%</span>`));
+  const g = el("div", "gauge bp-gauge");
+  g.innerHTML = `<i style="width:${pct}%"></i><b style="left:${h.thresholds[0] * 100}%"></b><b style="left:${h.thresholds[1] * 100}%"></b>`;
+  box.append(g);
+  box.append(el("div", "bp-scale", `<span>低</span><span style="left:${h.thresholds[0] * 100}%">中</span><span style="left:${h.thresholds[1] * 100}%">高</span>`));
+  box.append(el("div", "sub",
+    `依据 ${h.days} 天的脉搏波形(今天 ${h.segments} 段),加上你的年龄、BMI、静息心率、HRV、睡眠和活动量。`));
+  if (h.questions_answered < h.questions_total) {
+    const ask = el("div", "bp-ask");
+    ask.innerHTML = `还有 ${h.questions_total - h.questions_answered} 个健康问题没回答(家族史、饮酒、吸烟),<a href="#" class="link-profile">在个人资料里填写</a>后结果会更准。`;
+    box.append(ask);
+  }
+  box.append(el("div", "il-foot", "这是根据脉搏波形做的风险筛查,不是血压测量,也不是诊断。想了解血压请用血压计测量,或咨询医生。"));
+}
+
+// Workout calories — Oura's energy_expenditure model on logged + detected workouts.
+const WORKOUT_TYPES = {
+  14: "步行", 12: "跑步", 5: "骑行", 8: "力量训练", 15: "瑜伽", 13: "游泳", 30: "HIIT", 21: "徒步",
+  7: "椭圆机", 11: "划船", 48: "爬楼梯", 49: "拉伸", 79: "有氧运动", 6: "跳舞", 24: "篮球", 26: "足球",
+  1: "羽毛球", 62: "乒乓球", 17: "网球", 23: "排球", 38: "跳绳", 28: "核心训练", 10: "普拉提", 32: "健身课",
+  2: "拳击", 3: "越野滑雪", 4: "交叉训练", 9: "曲棍球", 16: "高尔夫", 18: "攀岩", 19: "高山滑雪", 20: "单板滑雪",
+  22: "骑马", 25: "美式橄榄球", 27: "棒球", 29: "板球", 31: "跳水", 33: "福乐球", 34: "体操", 35: "手球",
+  36: "家务", 37: "滑冰", 39: "武术", 40: "柔韧训练", 41: "山地骑行", 42: "北欧式健走", 43: "定向越野",
+  44: "划桨", 45: "匹克球", 46: "轮滑", 47: "壁球", 50: "冲浪", 51: "水中健身", 52: "园艺劳动", 53: "板式网球",
+  54: "芬兰棒球", 55: "射箭", 56: "保龄球", 57: "飞盘", 58: "长曲棍球", 59: "橄榄球", 60: "垒球", 61: "短式墙网球",
+  63: "钓鱼", 64: "打猎", 65: "帆船", 66: "摔跤", 67: "壶铃", 68: "风筝冲浪", 69: "滑板", 70: "风筝滑雪",
+  71: "滑轮滑雪", 72: "雪鞋行走", 73: "帆板", 74: "太极", 75: "蹦床", 76: "呼啦圈", 77: "演奏乐器", 78: "赛车",
+  80: "VR 运动", 81: "芭蕾塑形", 65535: "其他",
+};
+const WORKOUT_MODE = { "hr+motion": "心率和动作", motion: "动作数据", hr: "心率数据", static_met: "这类运动的平均消耗(这段时间戒指数据不够)" };
+const WORKOUT_INTENSITY = { easy: "轻松", moderate: "适中", hard: "费力" };
+function renderWorkouts(d) {
+  const box = $("workouts");
+  box.innerHTML = "";
+  const w = d.workouts;
+  if (!w) {
+    box.append(el("div", "error", "需要 energy_expenditure 模型(Python + torch)。"));
+    return;
+  }
+  const list = w.workouts || [];
+  if (!list.length) {
+    box.append(el("div", "wk-empty", "还没有运动记录。点右上角「记录运动」,选好类型和时间,就能估算这段时间消耗了多少热量;戒指自动识别出的运动也会显示在这里。"));
+    return;
+  }
+  const weekAgo = Date.now() / 1000 - 7 * 86400;
+  const week = list.filter((x) => x.start >= weekAgo && x.kcal != null);
+  if (week.length) {
+    box.append(el("div", "sub wk-total",
+      `最近 7 天 ${week.length} 次运动,共消耗约 <b>${Math.round(week.reduce((a, x) => a + x.kcal, 0))}</b> 千卡(不含基础代谢)`));
+  }
+  const rows = el("div", "wk-list");
+  for (const x of [...list].reverse()) {
+    const name = WORKOUT_TYPES[x.type] || zh(x.type_name || "其他");
+    const row = el("div", "wk-row");
+    const meta = x.error
+      ? `<span class="wk-err">模型没有给出结果:${esc(zh(x.error))}</span>`
+      : `强度:${WORKOUT_INTENSITY[x.intensity] || "—"} · MET ${num(x.met)} · 心肺负荷 ${num(x.cardio_effort)}` +
+        `${x.steps ? ` · ${x.steps.toLocaleString()} 步(约 ${(x.distance_m / 1000).toFixed(2)} 公里)` : ""} · 依据${WORKOUT_MODE[x.mode] || x.mode}`;
+    row.innerHTML =
+      `<div class="wk-main"><div class="wk-name">${esc(name)}${x.source === "detected" ? '<span class="wk-tag">自动识别</span>' : ""}` +
+      `${x.note ? `<span class="wk-note">${esc(x.note)}</span>` : ""}</div>` +
+      `<div class="wk-when">${dayTitle(localYmd(x.start))} ${clockOf(x.start)}–${clockOf(x.end)} · ${x.minutes} 分钟</div>` +
+      `<div class="wk-meta">${meta}</div></div>` +
+      `<div class="wk-kcal">${x.kcal != null ? `${Math.round(x.kcal)}<span>千卡</span>` : "—"}</div>`;
+    if (x.source !== "detected") {
+      const del = el("button", "wk-del", "删除");
+      del.type = "button";
+      del.title = "删除这条记录";
+      del.addEventListener("click", () => deleteWorkout(x.id));
+      row.append(del);
+    }
+    rows.append(row);
+  }
+  box.append(rows);
+  box.append(el("div", "il-foot", "热量由 Oura 的能量模型根据这段时间戒指的动作、步态和心率估算,是活动消耗,不含基础代谢。"));
+}
+function openWorkout() {
+  const sel = $("w-type");
+  if (!sel.options.length) {
+    // the everyday ones first, then the rest by id (object keys would sort numerically)
+    const common = [14, 12, 5, 8, 15, 13, 30, 21, 7, 11, 48, 49, 79, 6, 24, 26, 1, 62, 17, 23, 38, 28, 10, 32];
+    const rest = Object.keys(WORKOUT_TYPES).map(Number).filter((id) => !common.includes(id));
+    for (const id of [...common, ...rest]) sel.append(new Option(WORKOUT_TYPES[id], id));
+  }
+  const now = new Date(Date.now() - 30 * 60 * 1000);
+  now.setSeconds(0, 0);
+  const pad = (v) => String(v).padStart(2, "0");
+  $("w-start").value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  $("w-minutes").value = 30;
+  $("w-intensity").value = "-1";
+  $("w-note").value = "";
+  $("workout-dialog").showModal();
+}
+async function saveWorkout(e) {
+  e.preventDefault();
+  const start = new Date($("w-start").value).getTime() / 1000;
+  const minutes = +$("w-minutes").value;
+  if (!Number.isFinite(start) || !(minutes >= 5 && minutes <= 720)) {
+    toast("请填写开始时间,时长在 5 到 720 分钟之间。", "error");
+    return;
+  }
+  if (start + minutes * 60 > Date.now() / 1000 + 3600) {
+    toast("运动结束时间不能在未来。", "error");
+    return;
+  }
+  $("workout-save").disabled = true;
+  try {
+    const r = await postDash("/api/workouts", {
+      op: "add", type: +$("w-type").value, start, end: start + minutes * 60,
+      intensity: +$("w-intensity").value, note: $("w-note").value.trim(),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) {
+      toast(zh(j.error || "无法保存这条运动记录。"), "error");
+      return;
+    }
+    $("workout-dialog").close();
+    await load(); // re-runs the energy model with the new workout
+  } catch {
+    toast("连接不上本地服务器。", "error");
+  } finally {
+    $("workout-save").disabled = false;
+  }
+}
+async function deleteWorkout(id) {
+  if (!confirm("删除这条运动记录?")) return;
+  try {
+    const r = await postDash("/api/workouts", { op: "delete", id });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) {
+      toast(zh(j.error || "删除失败。"), "error");
+      return;
+    }
+    await load();
+  } catch {
+    toast("连接不上本地服务器。", "error");
+  }
+}
+
+// Training load — Oura's training_stress_score ("OTS") on the last 12 h of METs.
+function renderTrainingLoad(d) {
+  const box = $("training-load");
+  box.innerHTML = "";
+  const t = d.training_load;
+  if (!t || !t.latest) {
+    box.append(el("div", "error", "需要至少 12 小时的活动(MET)数据和 training_stress_score 模型。"));
+    return;
+  }
+  // the home page's day: its peak; on the newest day also the current value
+  const ymd = homeDay(d), newest = localYmd(t.latest.unix), td = (t.daily || {})[ymd];
+  const th = (+t.threshold).toFixed(1);
+  if (ymd === newest) {
+    const high = t.latest.high;
+    box.append(el("div", "big-metric",
+      `<span class="n${high ? " bp-warn" : ""}">${t.latest.load.toFixed(1)}</span><span class="u">${high ? "偏高" : "正常"} · 高于 ${th} 算偏高</span>`));
+  } else if (td) {
+    const high = td.peak > +t.threshold;
+    box.append(el("div", "big-metric",
+      `<span class="n${high ? " bp-warn" : ""}">${td.peak.toFixed(1)}</span><span class="u">${dayTitle(ymd)}峰值 · 高于 ${th} 算偏高</span>`));
+  } else {
+    box.append(el("div", "big-metric", `<span class="n">—</span><span class="u">${dayTitle(ymd)}</span>`));
+  }
+  box.append(el("div", "sub",
+    `按最近 12 小时的活动强度加权(越近、越剧烈权重越大),再按你的静息心率和 VO₂max 调整。` +
+    (td ? `${dayTitle(ymd)}峰值 ${td.peak.toFixed(1)}${td.high_minutes ? `,偏高 ${td.high_minutes} 分钟` : ""}。` : `${dayTitle(ymd)}没有足够的活动数据(需要连续 12 小时里戴够 6 小时)。`)));
+  // the 48 h ending on that day (or now)
+  const endAt = ymd === newest ? t.latest.unix : new Date(`${ymd}T23:59:59`).getTime() / 1000;
+  const pts = (t.series || []).filter((p) => p.unix <= endAt && p.unix >= endAt - 48 * 3600);
+  if (pts.length >= 2) {
+    const hi = Math.max(t.threshold * 1.1, ...pts.map((p) => p.load)), t0 = pts[0].unix, span = Math.max(1, pts[pts.length - 1].unix - t0);
+    const xy = pts.map((p) => `${(((p.unix - t0) / span) * 100).toFixed(2)},${(40 - (p.load / hi) * 40).toFixed(2)}`).join(" ");
+    const thY = (40 - (t.threshold / hi) * 40).toFixed(2);
+    const sp = el("div", "cv-spark");
+    sp.innerHTML = `<svg viewBox="0 0 100 40" preserveAspectRatio="none"><line x1="0" x2="100" y1="${thY}" y2="${thY}" class="tl-th" /><polyline points="${xy}" /></svg>` +
+      `<div class="cv-spark-l"><span>${clockOf(t0)}</span><span>最近 48 小时</span><span>${clockOf(pts[pts.length - 1].unix)}</span></div>`;
+    box.append(sp);
+  }
+  box.append(el("div", "il-foot", "没有本地的准备度分数,按正常阈值判断(准备度低于 60 时 Oura 会把阈值调低 10%)"));
+}
+
+// Stress resilience — Oura's stress_resilience model over the daily stress indices.
+const RES_LEVEL = { limited: "有限", adequate: "尚可", solid: "稳固", strong: "强", exceptional: "卓越" };
+function renderResilience(d) {
+  const box = $("resilience");
+  box.innerHTML = "";
+  const r = d.resilience;
+  if (!r) {
+    box.append(el("div", "error", "需要白天压力数据、睡眠记录和 stress_resilience 模型。"));
+    return;
+  }
+  const days = (r.days || []).filter((x) => x.daily_stress != null);
+  const ymd = homeDay(d);
+  const last = days.find((x) => x.date === ymd);
+  if (r.latest && r.latest.level) {
+    box.append(el("div", "big-metric",
+      `<span class="n">${RES_LEVEL[r.latest.level] || r.latest.level}</span><span class="u">抗压能力 · 可信度 ${Math.round((r.latest.confidence || 0) * 100)}%</span>`));
+  } else {
+    box.append(el("div", "big-metric", `<span class="n">${r.days_with_indices}/${r.days_needed}</span><span class="u">天 · 攒够 ${r.days_needed} 天后给出抗压等级</span>`));
+  }
+  if (last) {
+    const kvs = el("div", "kvs");
+    kvs.append(el("div", "kv", `<div class="k">压力负荷</div><div class="v">${last.daily_stress}</div>`));
+    kvs.append(el("div", "kv", `<div class="k">白天恢复</div><div class="v">${last.daily_restorative_time}</div>`));
+    kvs.append(el("div", "kv", `<div class="k">睡眠恢复</div><div class="v">${last.daily_sleep_recovery}</div>`));
+    box.append(kvs);
+    box.append(el("div", "sub", `${dayTitle(last.date)}的三项日指标(0–100)。抗压等级看的是最近 14 天里"恢复"能不能跟上"压力"。`));
+  } else {
+    box.append(el("div", "sub", `${dayTitle(ymd)}没有日指标(需要当天 4 小时以上的白天压力数据和前一晚的睡眠)。`));
+  }
+  box.append(el("div", "il-foot",
+    "睡眠恢复用到的准备度子分数是近似值:睡眠分用本地的睡眠评分,恢复指数和静息心率按 Oura 的公开定义估算,HRV 平衡缺省"));
+}
+
+// Meal timing — Oura's meal_timing model over the meals you log.
+function renderMeals(d) {
+  const box = $("meals");
+  box.innerHTML = "";
+  const m = d.meals;
+  MEAL_LOG = (m && m.meals) || [];
+  if (!m) {
+    box.append(el("div", "error", "需要 meal_timing 模型(Python + torch)。"));
+    return;
+  }
+  const hm = (min) => `${String(Math.floor(min / 60) % 24).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+  if ((m.windows || []).length && m.count >= m.min_meals) {
+    box.append(el("div", "big-metric",
+      `<span class="n">${m.consistency != null ? Math.round(m.consistency * 100) + "%" : "—"}</span><span class="u">用餐规律 · ${m.count} 次记录</span>`));
+    const w = el("div", "meal-windows");
+    for (const x of m.windows) w.append(el("span", "meal-win", `${hm(x.start_min)}–${hm(x.start_min + x.minutes)}`));
+    box.append(w);
+    box.append(el("div", "sub", "这些是你经常吃饭的时段;规律度是落在这些时段里的用餐次数占比。"));
+  } else {
+    box.append(el("div", "wk-empty",
+      `已记录 ${m.count} 次用餐,攒够 ${m.min_meals} 次后会算出你固定的用餐时段和规律程度。点右上角「记录用餐」,每次吃饭记一下时间就行。`));
+  }
+  const recent = (m.meals || []).slice(-6).reverse();
+  if (recent.length) {
+    const list = el("div", "meal-list");
+    for (const x of recent) {
+      const row = el("div", "meal-row", `<span>${dayTitle(localYmd(x.t))} ${clockOf(x.t)}</span><span class="wk-note">${esc(x.note || "")}</span>`);
+      const del = el("button", "wk-del", "删除");
+      del.type = "button";
+      del.addEventListener("click", () => deleteMeal(x.id));
+      row.append(del);
+      list.append(row);
+    }
+    box.append(list);
+  }
+}
+// Which meal a clock time most likely is (local time), given what you already logged
+// earlier that day: the dialog preselects it and keeps following the time field until
+// you pick one yourself.
+//   05:00–11:00 早餐 · 11:00–14:00 早午餐 (午餐 if a 早餐 is already logged that day)
+//   14:00–17:00 午餐 (加餐 if a 午餐/早午餐 is already logged) · 17:00–21:30 晚餐 · else 夜宵
+let MEAL_LOG = []; // the logged meals, refreshed by renderMeals
+function mealKindAt(date) {
+  const m = date.getHours() * 60 + date.getMinutes();
+  const day = localYmd(date.getTime() / 1000);
+  const earlier = MEAL_LOG.filter((x) => localYmd(x.t) === day && x.t * 1000 < date.getTime()).map((x) => x.note);
+  if (m >= 5 * 60 && m < 11 * 60) return "早餐";
+  if (m >= 11 * 60 && m < 14 * 60) return earlier.includes("早餐") ? "午餐" : "早午餐";
+  if (m >= 14 * 60 && m < 17 * 60) return earlier.some((n) => n === "午餐" || n === "早午餐") ? "加餐" : "午餐";
+  if (m >= 17 * 60 && m < 21 * 60 + 30) return "晚餐";
+  return "夜宵";
+}
+let MEAL_KIND_PICKED = false;
+function openMeal() {
+  const now = new Date();
+  now.setSeconds(0, 0);
+  const pad = (v) => String(v).padStart(2, "0");
+  $("m-time").value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  MEAL_KIND_PICKED = false;
+  $("m-note").value = mealKindAt(now);
+  $("meal-dialog").showModal();
+}
+function followMealTime() {
+  const t = new Date($("m-time").value);
+  if (!MEAL_KIND_PICKED && !Number.isNaN(t.getTime())) $("m-note").value = mealKindAt(t);
+}
+async function saveMeal(e) {
+  e.preventDefault();
+  const t = new Date($("m-time").value).getTime() / 1000;
+  if (!Number.isFinite(t)) { toast("请填写用餐时间。", "error"); return; }
+  $("meal-save").disabled = true;
+  try {
+    const r = await postDash("/api/meals", { op: "add", t, tz: -new Date(t * 1000).getTimezoneOffset() / 60, note: $("m-note").value });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) { toast(zh(j.error || "无法保存这次用餐。"), "error"); return; }
+    $("meal-dialog").close();
+    await load();
+  } catch {
+    toast("连接不上本地服务器。", "error");
+  } finally {
+    $("meal-save").disabled = false;
+  }
+}
+async function deleteMeal(id) {
+  if (!confirm("删除这条用餐记录?")) return;
+  try {
+    const r = await postDash("/api/meals", { op: "delete", id });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) { toast(zh(j.error || "删除失败。"), "error"); return; }
+    await load();
+  } catch {
+    toast("连接不上本地服务器。", "error");
+  }
 }
 
 function renderSpo2(d) {
   const box = $("spo2");
   box.innerHTML = "";
-  const n0 = (d.nights || []).find((n) => n.spo2_mean != null);
-  if (!n0) {
-    box.append(el("div", "error", "血氧需要在夜间开启 spo2 功能。"));
+  const ymd = homeDay(d);
+  const n0 = ymd && nightForDay(d, ymd);
+  if (!n0 || n0.spo2_mean == null) {
+    const any = (d.nights || []).some((n) => n.spo2_mean != null);
+    box.append(el("div", "error", any ? `${dayTitle(ymd)}醒来前的那晚没有血氧数据。` : "血氧需要在夜间开启 spo2 功能。"));
     return;
   }
   // SpO2 gauge scale: clamp the reading into [SPO2_MIN, 100] and map to 0–100% fill.
   const SPO2_MIN = 85, SPO2_HEALTHY = 95;
-  box.append(el("div", "big-metric", `<span class="n">${n0.spo2_mean}</span><span class="u">% 昨晚平均</span>`));
+  box.append(el("div", "big-metric", `<span class="n">${n0.spo2_mean}</span><span class="u">% ${dayTitle(ymd)}醒来前那晚的平均</span>`));
   box.append(el("div", "sub", "由戒指的 R 比值换算(使用 Oura 自己的校准曲线)。"));
   const pct = Math.max(0, Math.min(100, ((n0.spo2_mean - SPO2_MIN) / (100 - SPO2_MIN)) * 100));
   const g = el("div", "gauge");
@@ -733,7 +1317,13 @@ function closePage() {
 }
 let DAY_NAV = null; // the open day page's ← / → targets
 document.addEventListener("keydown", (e) => {
-  if ($("page").hidden) return;
+  if ($("page").hidden) {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if (typing || document.querySelector("dialog[open]") || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const dir = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+    if (dir) { e.preventDefault(); stepHomeDay(dir); }
+    return;
+  }
   if (e.key === "Escape") closePage();
   else if (DAY_NAV && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
     const go = e.key === "ArrowLeft" ? DAY_NAV.older : e.key === "ArrowRight" ? DAY_NAV.newer : null;
@@ -776,7 +1366,8 @@ function openDayPage(d, ymd, focus = null, keepScroll = false) {
   head.append(back, when, exp);
   const cursor = dayCursor(axis);
   const body = el("div", "rpt-body");
-  body.append(sleepSection(d, ymd, axis, cursor), activitySection(d, ymd, axis, cursor), heartSection(ymd, axis, cursor));
+  body.append(sleepSection(d, ymd, axis, cursor), activitySection(d, ymd, axis, cursor),
+    stressSection(d, ymd, axis, cursor), heartSection(ymd, axis, cursor));
   wrap.append(head, body);
   const top = $("page").scrollTop;
   showPage(wrap);
@@ -1347,6 +1938,84 @@ function activitySection(d, ymd, axis, cursor) {
   } else {
     sec.append(el("div", "ad-muted", "这一天没有检测到活动。"));
   }
+  return sec;
+}
+
+// ── daytime stress on the day page's time axis ───────────────
+// Each scored 5-minute slot is a bar from the centre line: up = restored, down =
+// stressed (the model's scaled intensity, −1…+1), faint = neutral; imputed slots are
+// lighter. The HRV lane shows the slot's dHRV against the personal baseline.
+function stressSection(d, ymd, axis, cursor) {
+  const sec = el("section", "rpt-sec");
+  sec.id = "sec-stress";
+  sec.append(secHead("白天压力"));
+  const st = d.stress;
+  const slot = (st && st.slot_minutes) || 5;
+  const day = ((st && st.samples) || []).filter((s) => s.unix != null && localYmd(s.unix) === ymd);
+  if (!st || !day.length) {
+    sec.append(el("div", "ad-muted", "这一天没有白天清醒、静坐时的压力数据。"));
+    return sec;
+  }
+  const mins = (z) => day.filter((s) => s.zone === z).length * slot;
+  const [r, n, x] = [mins("restored"), mins("neutral"), mins("stressed")];
+  const verdict = x > r * 1.25 ? "偏紧张" : r > x * 1.25 ? "偏放松" : "平稳";
+  const strip = el("div", "stat-strip");
+  strip.innerHTML = statTile("整体", verdict) + statTile("紧张", fmtMins(x)) + statTile("放松", fmtMins(r)) +
+    statTile("平稳", fmtMins(n)) + statTile("白天 HRV 基线", `${Math.round(st.dhrv_baseline)} ms`);
+  sec.append(strip);
+
+  const W = 1000, H = 110, mid = H / 2, half = H / 2 - 6;
+  const slotOf = (t) => day.find((s) => t > s.unix - slot * 60 && t <= s.unix);
+  const color = (z) => (z === "stressed" ? "var(--warn)" : z === "restored" ? "var(--accent)" : "var(--faint)");
+  const bars = day.map((s) => {
+    const a = axis.frac(s.unix - slot * 60) * W, b = axis.frac(s.unix) * W;
+    const v = Math.max(-1, Math.min(1, s.intensity_scaled || 0));
+    const h = Math.max(1.5, Math.abs(v) * half), y = v >= 0 ? mid - h : mid;
+    return `<rect x="${a.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(0.8, b - a - 0.4).toFixed(1)}" height="${h.toFixed(1)}" fill="${color(s.zone)}" opacity="${s.imputed ? 0.55 : 0.95}"/>`;
+  }).join("");
+  const stressSvg = `<svg class="lane-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+    `<line x1="0" x2="${W}" y1="${mid}" y2="${mid}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>${bars}</svg>`;
+  const stressAt = (t) => {
+    const s = slotOf(t);
+    if (!s) return "—";
+    const z = STRESS_ZONE[s.zone] || STRESS_ZONE.neutral, dl = Math.round(s.intensity);
+    return `${z.label} ${dl > 0 ? "+" : ""}${dl} ms`;
+  };
+
+  const HH = 70, pad = 8, base = st.dhrv_baseline;
+  const vals = day.map((s) => s.dhrv).concat([base]);
+  const lo = Math.min(...vals) - 2, hi = Math.max(...vals) + 2;
+  const yOf = (v) => pad + (1 - (v - lo) / Math.max(1, hi - lo)) * (HH - 2 * pad);
+  const dots = day.map((s) => {
+    const cx = axis.frac(s.unix - (slot * 60) / 2) * W;
+    return `<circle cx="${cx.toFixed(1)}" cy="${yOf(s.dhrv).toFixed(1)}" r="2.2" fill="${color(s.zone)}" opacity="${s.imputed ? 0.55 : 1}"/>`;
+  }).join("");
+  const hrvSvg = `<svg class="lane-svg" viewBox="0 0 ${W} ${HH}" preserveAspectRatio="none">` +
+    `<line x1="0" x2="${W}" y1="${yOf(base).toFixed(1)}" y2="${yOf(base).toFixed(1)}" stroke="var(--faint)" stroke-dasharray="4 4" stroke-width="1" vector-effect="non-scaling-stroke"/>${dots}</svg>`;
+  const hrvAt = (t) => { const s = slotOf(t); return s ? `${Math.round(s.dhrv)} ms${s.imputed ? " 补全" : " 实测"}` : "—"; };
+
+  sec.append(el("p", "subhead", "压力强度(向上 = 放松,向下 = 紧张,数值是比基线高或低多少;浅色 = 模型补全)"),
+    tlBox(axis, cursor, [
+      { label: "压力", summary: verdict, height: H, html: stressSvg, valueAt: stressAt },
+      { label: "HRV", summary: `基线 ${Math.round(base)} ms`, height: HH, html: hrvSvg, valueAt: hrvAt },
+    ]));
+
+  const events = (st.events || []).filter((e) => localYmd(e.end) === ymd);
+  sec.append(el("p", "subhead", "持续紧张 / 持续恢复"));
+  if (events.length) {
+    const list = el("div", "hr-eps rpt-events");
+    for (const e of events) {
+      list.append(el("div", `hr-ep ${e.kind === "stressed" ? "hr-high" : "hr-low"}`,
+        `<span class="hr-ep-t">${clockOf(e.start)}–${clockOf(e.end)}</span>` +
+        `<span class="hr-ep-v"><b class="hr-ep-k">${e.kind === "stressed" ? "持续紧张" : "持续恢复"}</b> ${e.minutes} 分钟</span>`));
+    }
+    sec.append(list);
+  } else {
+    sec.append(el("div", "ad-muted", "这一天没有持续约 1 小时的明显紧张或恢复。"));
+  }
+  const imputed = day.filter((s) => s.imputed).length;
+  sec.append(el("div", "il-foot",
+    `${day.length - imputed} 个实测 + ${imputed} 个由模型补全的 5 分钟时段;只统计清醒、静坐的时段,睡眠和活动中的时间不算`));
   return sec;
 }
 
@@ -2113,6 +2782,13 @@ function openProfile() {
   $("f-age").value = p.age ?? 30;
   $("f-height").value = p.height_m ?? 1.78;
   $("f-weight").value = p.weight_kg ?? 75;
+  const opt = (v) => (v == null ? "" : String(Math.round(v)));
+  $("f-cvd").value = opt(p.cvd_family_history);
+  $("f-alcohol").value = opt(p.alcohol_frequency);
+  $("f-smoke-ever").value = opt(p.smoking_history);
+  $("f-smoke-now").value = opt(p.smoking_current);
+  $("f-hr-low").value = p.hr_alert_low ?? "";
+  $("f-hr-high").value = p.hr_alert_high ?? "";
   $("profile-dialog").showModal();
 }
 async function saveProfile(e) {
@@ -2124,6 +2800,18 @@ async function saveProfile(e) {
     weight_kg: +$("f-weight").value,
     ring_size: (CURRENT_PROFILE && CURRENT_PROFILE.ring_size) || 10, // not on the ring; kept default
   };
+  // optional answers: "" clears (null), otherwise a number
+  const val = (id) => ($(id).value === "" ? null : +$(id).value);
+  Object.assign(body, {
+    cvd_family_history: val("f-cvd"), alcohol_frequency: val("f-alcohol"),
+    smoking_history: val("f-smoke-ever"), smoking_current: val("f-smoke-now"),
+    hr_alert_low: val("f-hr-low"), hr_alert_high: val("f-hr-high"),
+  });
+  const lo = body.hr_alert_low ?? 40, hi = body.hr_alert_high ?? 120;
+  if (!(lo >= 25 && lo <= 100 && hi >= 60 && hi <= 220 && lo < hi)) {
+    toast("心率下限要在 25–100、上限在 60–220 bpm 之间,且下限低于上限。", "error");
+    return;
+  }
   $("profile-save").disabled = true;
   try {
     const r = await postDash("/api/profile", body);
@@ -2324,6 +3012,7 @@ async function load() {
     showLoadError(d.error);
     return;
   }
+  LAST_SUMMARY = d;
   CURRENT_PROFILE = d.profile || null;
   CURRENT_TZ = d.tz || 0;
   LAST_DEVICE_SERIAL = d.device && d.device.serial;
@@ -2338,6 +3027,14 @@ async function load() {
   renderIllness(d);
   renderCardio(d);
   renderSpo2(d);
+  renderStress(d);
+  renderBreathing(d);
+  renderHrAlerts(d);
+  renderHypertension(d);
+  renderWorkouts(d);
+  renderTrainingLoad(d);
+  renderResilience(d);
+  renderMeals(d);
   renderDevice(d);
   document.querySelectorAll(".panel").forEach((p, i) => {
     p.classList.add("reveal");
@@ -2346,10 +3043,28 @@ async function load() {
 }
 
 $("sync-btn").addEventListener("click", doSync);
+$("home-older").addEventListener("click", () => stepHomeDay(-1));
+$("home-newer").addEventListener("click", () => stepHomeDay(1));
 $("live-btn").addEventListener("click", toggleLive);
 $("profile-btn").addEventListener("click", openProfile);
 $("profile-form").addEventListener("submit", saveProfile);
 $("profile-cancel").addEventListener("click", () => $("profile-dialog").close());
+$("workout-add").addEventListener("click", openWorkout);
+$("stress-open").addEventListener("click", () => LAST_SUMMARY && openDayPage(LAST_SUMMARY, homeDay(LAST_SUMMARY), "stress"));
+$("meal-add").addEventListener("click", openMeal);
+$("meal-form").addEventListener("submit", saveMeal);
+$("m-time").addEventListener("input", followMealTime);
+$("m-note").addEventListener("change", () => { MEAL_KIND_PICKED = true; });
+$("meal-cancel").addEventListener("click", () => $("meal-dialog").close());
+$("workout-form").addEventListener("submit", saveWorkout);
+$("workout-cancel").addEventListener("click", () => $("workout-dialog").close());
+// "edit in your profile" links inside the model cards
+document.addEventListener("click", (e) => {
+  const a = e.target.closest && e.target.closest(".link-profile");
+  if (!a) return;
+  e.preventDefault();
+  openProfile();
+});
 load();
 setInterval(autoRefresh, 60 * 1000);
 document.addEventListener("visibilitychange", autoRefresh);

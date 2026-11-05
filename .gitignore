@@ -35,6 +35,8 @@ local/
 
 # Runtime state the CLI writes next to the DB (personal profile, ring feature modes).
 profile.json
+workouts.json
+meals.json
 feature_modes.json
 nssa_cache.json
 

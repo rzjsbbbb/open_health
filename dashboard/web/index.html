@@ -40,7 +40,11 @@
     </section>
 
     <section class="today" aria-labelledby="today-label">
-      <h2 class="today-label" id="today-label">今天</h2>
+      <div class="today-head">
+        <button type="button" class="day-step" id="home-older" title="前一天(←)" aria-label="前一天">‹</button>
+        <h2 class="today-label" id="today-label">今天</h2>
+        <button type="button" class="day-step" id="home-newer" title="后一天(→)" aria-label="后一天">›</button>
+      </div>
       <div class="tiles" id="tiles">
         <article class="tile skeleton"></article>
         <article class="tile skeleton"></article>
@@ -78,6 +82,61 @@
             <div id="spo2" class="spo2-body"><div class="skeleton skeleton-block"></div></div>
           </section>
         </div>
+
+        <div class="cols-2" id="model-grid">
+          <section class="panel" id="stress-panel">
+            <div class="panel-head">
+              <h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>白天压力</h2>
+              <button id="stress-open" class="action" type="button">展开时间轴</button>
+            </div>
+            <div id="stress" class="stress-body"><div class="skeleton skeleton-block"></div></div>
+          </section>
+
+          <section class="panel" id="breathing-panel">
+            <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>睡眠呼吸</h2></div>
+            <div id="breathing" class="breathing-body"><div class="skeleton skeleton-block"></div></div>
+          </section>
+        </div>
+
+        <div class="cols-2" id="model-grid-2">
+          <section class="panel" id="hr-alert-panel">
+            <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>心率提醒</h2></div>
+            <div id="hr-alerts"><div class="skeleton skeleton-block"></div></div>
+          </section>
+
+          <section class="panel" id="bp-panel">
+            <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>高血压风险</h2></div>
+            <div id="hypertension"><div class="skeleton skeleton-block"></div></div>
+          </section>
+        </div>
+
+        <div class="cols-2" id="model-grid-3">
+          <section class="panel" id="load-panel">
+            <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/person-simple-run.svg)"></span>训练负荷</h2></div>
+            <div id="training-load"><div class="skeleton skeleton-block"></div></div>
+          </section>
+
+          <section class="panel" id="resilience-panel">
+            <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>抗压能力</h2></div>
+            <div id="resilience"><div class="skeleton skeleton-block"></div></div>
+          </section>
+        </div>
+
+        <section class="panel" id="workout-panel">
+          <div class="panel-head">
+            <h2><span class="ic" style="--i:url(/icons/act-kcal.svg)"></span>运动消耗</h2>
+            <button id="workout-add" class="action" type="button">记录运动</button>
+          </div>
+          <div id="workouts"><div class="skeleton skeleton-block"></div></div>
+        </section>
+
+        <section class="panel" id="meal-panel">
+          <div class="panel-head">
+            <h2><span class="ic" style="--i:url(/icons/act-kcal.svg)"></span>用餐规律</h2>
+            <button id="meal-add" class="action" type="button">记录用餐</button>
+          </div>
+          <div id="meals"><div class="skeleton skeleton-block"></div></div>
+        </section>
       </div>
 
       <aside class="dashboard-side">
@@ -147,7 +206,7 @@
   <dialog id="profile-dialog" class="dialog">
     <form id="profile-form" method="dialog">
       <h3>个人资料</h3>
-      <p class="dialog-sub">戒指测不到这些信息。它们用来调整心血管年龄模型,只保存在本机。(戒指尺码不在戒指里,而是账户信息,对结果几乎没有影响,所以保留默认值。)</p>
+      <p class="dialog-sub">戒指测不到这些信息。它们用来调整心血管年龄、运动消耗和高血压风险模型,只保存在本机。(戒指尺码不在戒指里,而是账户信息,对结果几乎没有影响,所以保留默认值。)</p>
       <div class="field-row">
         <div class="field">
           <label for="f-sex">出生性别</label>
@@ -163,9 +222,82 @@
         <div class="field"><label for="f-height">身高(米)</label><input id="f-height" name="height_m" type="number" min="1" max="2.3" step="0.01" /></div>
         <div class="field"><label for="f-weight">体重(公斤)</label><input id="f-weight" name="weight_kg" type="number" min="20" max="250" step="1" /></div>
       </div>
+      <h4 class="dialog-h">健康问卷<span>用于高血压风险评估,可以不填</span></h4>
+      <div class="field-row">
+        <div class="field">
+          <label for="f-cvd">直系亲属有心血管病</label>
+          <select id="f-cvd"><option value="">不填</option><option value="0">没有</option><option value="1">有</option></select>
+        </div>
+        <div class="field">
+          <label for="f-alcohol">饮酒频率</label>
+          <select id="f-alcohol">
+            <option value="">不填</option><option value="0">从不</option><option value="1">每月 1 次或更少</option>
+            <option value="2">每月 2–4 次</option><option value="3">每周 2–3 次</option><option value="4">每周 4 次或更多</option>
+          </select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="f-smoke-ever">吸过烟</label>
+          <select id="f-smoke-ever"><option value="">不填</option><option value="0">从没吸过</option><option value="1">吸过</option></select>
+        </div>
+        <div class="field">
+          <label for="f-smoke-now">现在吸烟</label>
+          <select id="f-smoke-now"><option value="">不填</option><option value="0">不吸</option><option value="1">偶尔</option><option value="2">每天</option></select>
+        </div>
+      </div>
+      <h4 class="dialog-h">心率提醒<span>静止时心率超出这个范围会被标出来</span></h4>
+      <div class="field-row">
+        <div class="field"><label for="f-hr-low">下限(bpm)</label><input id="f-hr-low" type="number" min="25" max="100" step="1" placeholder="40" /></div>
+        <div class="field"><label for="f-hr-high">上限(bpm)</label><input id="f-hr-high" type="number" min="60" max="220" step="1" placeholder="120" /></div>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="profile-cancel" class="btn-text">取消</button>
         <button type="submit" id="profile-save" class="btn-primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="workout-dialog" class="dialog">
+    <form id="workout-form" method="dialog">
+      <h3>记录运动</h3>
+      <p class="dialog-sub">选好运动类型和时间段,Oura 的能量模型会根据这段时间戒指记下的动作和心率,估算这次运动消耗的热量。</p>
+      <div class="field"><label for="w-type">运动类型</label><select id="w-type"></select></div>
+      <div class="field-row">
+        <div class="field"><label for="w-start">开始时间</label><input id="w-start" type="datetime-local" required /></div>
+        <div class="field"><label for="w-minutes">时长(分钟)</label><input id="w-minutes" type="number" min="5" max="720" step="1" value="30" required /></div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="w-intensity">强度</label>
+          <select id="w-intensity"><option value="-1">让模型判断</option><option value="0">轻松</option><option value="1">适中</option><option value="2">费力</option></select>
+        </div>
+        <div class="field"><label for="w-note">备注</label><input id="w-note" type="text" maxlength="80" placeholder="可以不填" /></div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="workout-cancel" class="btn-text">取消</button>
+        <button type="submit" id="workout-save" class="btn-primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="meal-dialog" class="dialog">
+    <form id="meal-form" method="dialog">
+      <h3>记录用餐</h3>
+      <p class="dialog-sub">每次吃饭记一下时间。攒够 10 次后,Oura 的用餐时间模型会找出你固定的用餐时段,并算出规律程度。</p>
+      <div class="field-row">
+        <div class="field"><label for="m-time">时间</label><input id="m-time" type="datetime-local" required /></div>
+        <div class="field">
+          <label for="m-note">餐次</label>
+          <select id="m-note">
+            <option value="早餐">早餐</option><option value="早午餐">早午餐</option><option value="午餐">午餐</option>
+            <option value="晚餐">晚餐</option><option value="加餐">加餐</option><option value="夜宵">夜宵</option>
+          </select>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="meal-cancel" class="btn-text">取消</button>
+        <button type="submit" id="meal-save" class="btn-primary">保存</button>
       </div>
     </form>
   </dialog>
